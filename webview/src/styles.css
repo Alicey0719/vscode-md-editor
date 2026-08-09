@@ -1,0 +1,370 @@
+/* Self-hosted LINE Seed JP (Regular + Bold) via @fontsource, inlined as data URIs.
+ * We use the japanese subset only (covers Latin + hiragana + katakana + common CJK)
+ * to keep the bundle from ballooning past ~5MB. */
+@import '@fontsource/line-seed-jp/japanese-400.css';
+@import '@fontsource/line-seed-jp/japanese-700.css';
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  color: var(--vscode-editor-foreground);
+  background: var(--vscode-editor-background);
+  font-family: 'LINE Seed JP', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Yu Gothic UI', 'Meiryo', system-ui, sans-serif;
+  font-size: var(--vscode-font-size);
+}
+
+body {
+  --md-surface: var(--vscode-editor-background);
+  --md-paper: var(--vscode-editor-background);
+  --md-paper-border: var(--vscode-panel-border, rgba(128,128,128,0.25));
+  --md-toolbar-bg: color-mix(in oklab, var(--vscode-editor-background) 92%, black 8%);
+  background: color-mix(in oklab, var(--vscode-editor-background) 85%, black 15%);
+}
+
+body.vscode-light {
+  --md-paper: #ffffff;
+  --md-paper-border: rgba(0, 0, 0, 0.08);
+  --md-toolbar-bg: #ffffff;
+  background: #f2f3f5;
+}
+
+body.vscode-high-contrast {
+  --md-paper: var(--vscode-editor-background);
+  --md-paper-border: var(--vscode-contrastBorder, currentColor);
+}
+
+/* Layout: full-width flex column. Explicit widths on children, centered via margin. */
+#app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+  padding: 0 0 80px;
+  gap: 12px;
+}
+
+/* Sticky toolbar shell spans full viewport width. */
+.md-toolbar-shell {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--md-toolbar-bg);
+  backdrop-filter: saturate(140%) blur(6px);
+  border-bottom: 1px solid var(--md-paper-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  display: flex;
+  justify-content: center;
+  padding: 6px 12px;
+}
+
+.md-toolbar {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 2px;
+  align-items: center;
+  width: 100%;
+  max-width: 980px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.md-toolbar::-webkit-scrollbar { height: 4px; }
+.md-toolbar::-webkit-scrollbar-thumb {
+  background: var(--vscode-scrollbarSlider-background, rgba(128,128,128,0.3));
+  border-radius: 2px;
+}
+
+.md-toolbar-group {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.md-toolbar-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--md-paper-border);
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+.md-toolbar-btn {
+  min-width: 30px;
+  height: 30px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-editor-foreground);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.md-toolbar-btn:hover {
+  background: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.15));
+}
+
+.md-toolbar-btn:active {
+  background: var(--vscode-toolbar-activeBackground, rgba(128,128,128,0.28));
+}
+
+.md-toolbar-glyph {
+  display: inline-block;
+  min-width: 12px;
+  text-align: center;
+}
+
+/* Style dropdown */
+.md-toolbar-style { display: inline-flex; flex-shrink: 0; }
+
+.md-toolbar-select {
+  height: 30px;
+  min-width: 130px;
+  padding: 0 24px 0 10px;
+  border: 1px solid var(--md-paper-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vscode-editor-foreground);
+  font: inherit;
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><path d='M3 5l3 3 3-3' fill='none' stroke='%23808080' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  background-size: 12px;
+}
+
+.md-toolbar-select:hover {
+  background-color: var(--vscode-toolbar-hoverBackground, rgba(128,128,128,0.1));
+}
+
+.md-toolbar-select option {
+  background: var(--vscode-dropdown-background, var(--vscode-editor-background));
+  color: var(--vscode-dropdown-foreground, var(--vscode-editor-foreground));
+}
+
+/* Centered content column for the rest of the page. */
+.md-content-column {
+  width: 100%;
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 0 16px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.md-legacy-banner {
+  border: 1px solid var(--vscode-inputValidation-warningBorder, #b89500);
+  background: var(--vscode-inputValidation-warningBackground, rgba(200, 150, 0, 0.15));
+  color: var(--vscode-inputValidation-warningForeground, inherit);
+  padding: 10px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.md-legacy-banner ul {
+  margin: 6px 0 8px 20px;
+  padding: 0;
+}
+
+.md-legacy-btn {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  padding: 4px 10px;
+  border-radius: 3px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.md-legacy-btn:hover {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.md-frontmatter {
+  border: 1px solid var(--md-paper-border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  background: var(--md-paper);
+}
+
+.md-frontmatter summary {
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.md-frontmatter-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 8px;
+  padding: 8px;
+  font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--vscode-editor-foreground);
+  background: transparent;
+  border: 1px solid var(--md-paper-border);
+  border-radius: 4px;
+  resize: vertical;
+  min-height: 80px;
+}
+
+.md-frontmatter-input:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+}
+
+.md-paper {
+  background: var(--md-paper);
+  border: 1px solid var(--md-paper-border);
+  border-radius: 6px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 6px 20px rgba(0, 0, 0, 0.08);
+  min-height: 60vh;
+  padding: 56px 72px 96px;
+}
+
+@media (max-width: 720px) {
+  .md-paper { padding: 32px 20px 64px; }
+}
+
+/* Override Crepe's font CSS variables so headings/body all use LINE Seed JP.
+ * Crepe applies `--crepe-font-title` to h1-h6 with higher specificity than
+ * `.milkdown { font-family }`, so we redefine the variables at the root.
+ * Also re-tint Crepe's popup/menu colors (slash menu, tooltips, etc.) to
+ * follow VSCode theme instead of Crepe's built-in light/dark palette. */
+:root, .milkdown {
+  --crepe-font-default: 'LINE Seed JP', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Yu Gothic UI', 'Meiryo', system-ui, sans-serif;
+  --crepe-font-title: 'LINE Seed JP', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Yu Gothic UI', 'Meiryo', system-ui, sans-serif;
+}
+
+/* Bind Crepe surface/menu colors to VSCode's own theme tokens so popovers
+ * (slash `/` menu, link tooltip, toolbar, table controls) inherit the editor
+ * theme instead of Crepe's hardcoded palette. */
+.milkdown {
+  --crepe-color-background: var(--vscode-editor-background);
+  --crepe-color-on-background: var(--vscode-editor-foreground);
+  --crepe-color-surface: var(--vscode-menu-background, var(--vscode-dropdown-background, var(--vscode-editor-background)));
+  --crepe-color-surface-low: var(--vscode-menu-background, var(--vscode-dropdown-background, var(--vscode-editor-background)));
+  --crepe-color-on-surface: var(--vscode-menu-foreground, var(--vscode-dropdown-foreground, var(--vscode-editor-foreground)));
+  --crepe-color-on-surface-variant: var(--vscode-descriptionForeground, var(--vscode-editor-foreground));
+  --crepe-color-outline: var(--vscode-panel-border, rgba(128,128,128,0.35));
+  --crepe-color-primary: var(--vscode-focusBorder, #4ea3ff);
+  --crepe-color-secondary: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  --crepe-color-on-secondary: var(--vscode-editor-foreground);
+  --crepe-color-inverse: var(--vscode-editor-inverseForeground, var(--vscode-editor-background));
+  --crepe-color-on-inverse: var(--vscode-editor-background);
+  --crepe-color-hover: var(--vscode-list-hoverBackground, rgba(128,128,128,0.15));
+  --crepe-color-selected: var(--vscode-list-activeSelectionBackground, rgba(128,128,128,0.28));
+  --crepe-color-inline-area: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.15));
+  --crepe-color-inline-code: var(--vscode-textPreformat-foreground, #d16969);
+  --crepe-color-error: var(--vscode-errorForeground, #ff6666);
+  --crepe-shadow-1: 0 1px 2px rgba(0,0,0,0.25), 0 1px 3px rgba(0,0,0,0.15);
+  --crepe-shadow-2: 0 1px 2px rgba(0,0,0,0.25), 0 2px 6px rgba(0,0,0,0.15);
+}
+
+.md-paper .milkdown {
+  background: transparent;
+  color: var(--vscode-editor-foreground);
+  font-family: 'LINE Seed JP', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', 'Yu Gothic UI', 'Meiryo', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+/* Belt-and-suspenders: also override the heading font-family directly with
+ * higher specificity than Crepe's `.milkdown .ProseMirror h1`. */
+.md-paper .milkdown .ProseMirror h1,
+.md-paper .milkdown .ProseMirror h2,
+.md-paper .milkdown .ProseMirror h3,
+.md-paper .milkdown .ProseMirror h4,
+.md-paper .milkdown .ProseMirror h5,
+.md-paper .milkdown .ProseMirror h6 {
+  font-family: inherit;
+}
+
+/* Override Crepe's excessive editor padding — we control padding via .md-paper. */
+.md-paper .milkdown .ProseMirror {
+  outline: none;
+  padding: 0;
+  min-height: 400px;
+}
+
+.md-paper .milkdown .ProseMirror img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Link color — higher specificity than Crepe's `.milkdown .ProseMirror a`.
+ * Uses a bright blue that is legible in dark themes. */
+:root {
+  --md-link-color: #4ea3ff;
+  --md-link-color-hover: #7dbbff;
+}
+
+body.vscode-light {
+  --md-link-color: #0b57d0;
+  --md-link-color-hover: #0842a0;
+}
+
+.md-paper .milkdown .ProseMirror a {
+  color: var(--md-link-color);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--md-link-color) 60%, transparent 40%);
+  cursor: text;
+}
+
+.md-paper .milkdown .ProseMirror a:hover {
+  color: var(--md-link-color-hover);
+  text-decoration-color: var(--md-link-color-hover);
+}
+
+/* Standard list rendering (ListItem feature disabled → default <li>).
+ * Higher specificity than Crepe's `.milkdown .ProseMirror ul` which strips padding. */
+.md-paper .milkdown .ProseMirror ul,
+.md-paper .milkdown .ProseMirror ol {
+  padding-left: 2em;
+  margin: 0.5em 0;
+  list-style-position: outside;
+}
+
+.md-paper .milkdown .ProseMirror ul { list-style-type: disc; }
+.md-paper .milkdown .ProseMirror ul ul { list-style-type: circle; }
+.md-paper .milkdown .ProseMirror ul ul ul { list-style-type: square; }
+.md-paper .milkdown .ProseMirror ol { list-style-type: decimal; }
+.md-paper .milkdown .ProseMirror ol ol { list-style-type: lower-alpha; }
+.md-paper .milkdown .ProseMirror ol ol ol { list-style-type: lower-roman; }
+
+.md-paper .milkdown .ProseMirror li {
+  margin: 0.15em 0;
+  padding: 0;
+  display: list-item;
+}
+
+.md-paper .milkdown .ProseMirror li > p {
+  margin: 0;
+  padding: 0;
+}
+
+.md-paper .milkdown .ProseMirror li > ul,
+.md-paper .milkdown .ProseMirror li > ol {
+  margin: 0.15em 0 0.15em 0;
+  padding-left: 1.6em;
+}
+
+.md-paper .milkdown .ProseMirror li::marker {
+  color: var(--vscode-descriptionForeground);
+}
