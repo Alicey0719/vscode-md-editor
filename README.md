@@ -5,6 +5,51 @@ Markdown ファイルをいい感じに編集する VSCode Extension。
 
 ![](docs/67d63e16f1547a4c.png)
 
+## インストール
+
+### 1. VSIX を DL
+
+最新の `mdEditor.vsix` は [Releases ページ](https://github.com/Alicey0719/vscode-md-editor/releases/latest) から取得できます。
+
+CLI ワンライナー:
+
+```bash
+curl -L -o /tmp/mdEditor.vsix \
+  https://github.com/Alicey0719/vscode-md-editor/releases/latest/download/mdEditor.vsix
+```
+
+### 2. インストール
+
+方法A: **CLI (一番速い)**
+
+```bash
+code --install-extension /tmp/mdEditor.vsix
+```
+
+方法B: **VSCode GUI**
+
+1. コマンドパレットを開く (`Ctrl+Shift+P` / `Cmd+Shift+P`)
+2. `Extensions: Install from VSIX...` と入力して選択
+3. `.vsix` ファイルを選ぶ
+
+方法C: **Extensions パネル**
+
+1. 左サイドバーの Extensions アイコン
+2. パネル上部の `...` メニュー → `Install from VSIX...`
+
+### 3. 使う
+
+install 後、VSCode を再起動 (または `Developer: Reload Window`) してから:
+
+- 任意の `.md` ファイルを右クリック → **"Open in mdEditor"**
+- または コマンドパレット → **"Open in mdEditor"**
+
+### アンインストール
+
+```bash
+code --uninstall-extension alicey.md-editor
+```
+
 ## v1 スコープ
 
 * `.md` ファイルを右クリック → "Open in mdEditor" で起動
