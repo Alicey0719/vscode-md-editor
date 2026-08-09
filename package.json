@@ -4,6 +4,16 @@
   "description": "Google Docs-like WYSIWYG editor for Markdown files, with paste-to-save image handling.",
   "version": "0.1.0",
   "publisher": "alicey",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Alicey0719/vscode-md-editor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Alicey0719/vscode-md-editor/issues"
+  },
+  "homepage": "https://github.com/Alicey0719/vscode-md-editor#readme",
   "engines": {
     "vscode": "^1.90.0",
     "node": ">=20"
@@ -58,13 +68,16 @@
   },
   "scripts": {
     "build": "node esbuild.js",
+    "build:prod": "NODE_ENV=production node esbuild.js",
     "watch": "node esbuild.js --watch",
     "typecheck": "tsc -p . --noEmit && tsc -p webview --noEmit",
-    "package": "vsce package"
+    "package": "npm run typecheck && npm run build:prod && vsce package",
+    "publish": "npm run typecheck && npm run build:prod && vsce publish"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "3.5.0",
     "esbuild": "^0.24.0",
     "typescript": "^5.6.0"
   },

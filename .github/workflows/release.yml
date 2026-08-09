@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      # --ignore-scripts is our supply-chain default; explicitly set to keep
+      # CI runs identical to local dev.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Build (production)
+        run: npm run build:prod
+
+      - name: Package .vsix
+        run: npx vsce package --out mdEditor.vsix
+
+      - name: Attach .vsix to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: mdEditor.vsix
+          generate_release_notes: true
+
+      # Uncomment to publish to the VS Code Marketplace as well.
+      # Requires a Personal Access Token stored as the `VSCE_PAT` secret.
+      # - name: Publish to Marketplace
+      #   if: startsWith(github.ref, 'refs/tags/v')
+      #   env:
+      #     VSCE_PAT: ${{ secrets.VSCE_PAT }}
+      #   run: npx vsce publish --pat "$VSCE_PAT"

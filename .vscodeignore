@@ -1,14 +1,35 @@
+# Config / build tooling
 .vscode/**
 .vscode-test/**
-src/**
-webview/**
-node_modules/**
+.github/**
+.gitignore
+.nvmrc
+.npmrc
 tsconfig.json
 webview/tsconfig.json
 esbuild.js
-.gitignore
-**/*.ts
+scripts/**
+
+# Source (only built artifacts ship: dist/ + media/)
+src/**
+webview/**
+node_modules/**
+
+# Local test / drafting artifacts
+test.md
+test/**
+img/**
+docs/**
+
+# Sourcemaps (kept locally, not shipped)
 **/*.map
+**/*.ts
+**/*.tsbuildinfo
+
+# Ambient secrets
 .env
 .env.*
 *.local
+
+# Build byproducts
+*.vsix
