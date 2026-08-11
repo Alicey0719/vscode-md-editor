@@ -8,6 +8,7 @@ import '@milkdown/crepe/theme/frame-dark.css';
 
 import { saveImage, resolveImageUri, post } from './hostBridge';
 import { createToolbar } from './toolbar';
+import { patchImageBlockSerialization } from './imageBlockPatch';
 
 const IMAGE_MIME = /^image\/(png|jpeg|jpg|webp|gif)$/i;
 
@@ -57,6 +58,7 @@ export async function createBodyEditor(host: HTMLElement, initial: string): Prom
   });
 
   await crepe.create();
+  patchImageBlockSerialization(crepe);
 
   crepe.on((listener) => {
     listener.markdownUpdated((_ctx, markdown) => {

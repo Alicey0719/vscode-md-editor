@@ -4,7 +4,6 @@ import {
   toggleStrongCommand,
   toggleEmphasisCommand,
   toggleInlineCodeCommand,
-  toggleLinkCommand,
   wrapInHeadingCommand,
   wrapInBulletListCommand,
   wrapInOrderedListCommand,
@@ -17,6 +16,10 @@ import {
   toggleStrikethroughCommand,
   insertTableCommand,
 } from '@milkdown/preset-gfm';
+// Use link-tooltip's toggleLinkCommand (not preset-commonmark's) so clicking
+// the Link button opens Crepe's inline URL editor and keeps the text
+// selection. window.prompt() is unavailable in VSCode webviews.
+import { toggleLinkCommand } from '@milkdown/kit/component/link-tooltip';
 
 type CmdKey<T> = { key: string } & { _payload?: T };
 
@@ -146,10 +149,7 @@ function blockGroup(call: Callable): HTMLElement {
 
 function insertGroup(call: Callable): HTMLElement {
   const g = group();
-  iconBtn(g, icon.link, 'Link', () => {
-    const href = window.prompt('Link URL');
-    if (href) call(toggleLinkCommand, { href, title: '' });
-  });
+  iconBtn(g, icon.link, 'Link', () => call(toggleLinkCommand));
   iconBtn(g, icon.table, 'Insert table', () => call(insertTableCommand));
   iconBtn(g, icon.hr, 'Horizontal rule', () => call(insertHrCommand));
   return g;

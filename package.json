@@ -2,7 +2,7 @@
   "name": "md-editor",
   "displayName": "mdEditor",
   "description": "Google Docs-like WYSIWYG editor for Markdown files, with paste-to-save image handling.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "alicey",
   "license": "MIT",
   "icon": "media/icon.png",
