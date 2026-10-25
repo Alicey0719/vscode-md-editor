@@ -1,5 +1,6 @@
 import { Crepe } from '@milkdown/crepe';
 import {
+  commandsCtx,
   editorViewCtx,
   parserCtx,
   remarkCtx,
@@ -9,6 +10,7 @@ import {
 import type { Ctx } from '@milkdown/ctx';
 import { $prose } from '@milkdown/kit/utils';
 import { linkTooltipAPI } from '@milkdown/kit/component/link-tooltip';
+import { redoCommand, undoCommand } from '@milkdown/kit/plugin/history';
 import { Plugin } from '@milkdown/prose/state';
 import { Fragment, type Node as ProseNode } from '@milkdown/prose/model';
 import type { EditorView } from '@milkdown/prose/view';
@@ -34,6 +36,7 @@ export interface BodyEditor {
   takeMarkdown: () => { markdown: string; changed: boolean };
   onChange: (cb: () => void) => void;
   editLink: () => void;
+  history: (action: 'undo' | 'redo') => void;
   toolbar: HTMLElement;
   root: HTMLElement;
   destroy: () => Promise<void>;
@@ -222,6 +225,12 @@ export async function createBodyEditor(host: HTMLElement): Promise<BodyEditor> {
     },
     onChange: (cb) => changeCallbacks.push(cb),
     editLink,
+    history: (action) =>
+      withCtx((ctx) => {
+        const v = ctx.get(editorViewCtx);
+        v.focus();
+        ctx.get(commandsCtx).call((action === 'undo' ? undoCommand : redoCommand).key);
+      }),
     toolbar: toolbar.root,
     root: host,
     destroy: async () => {
@@ -242,10 +251,15 @@ function mergeRuns(
   a: BlockRun[],
   b: BlockRun[],
 ): { blocks: ProseNode[]; kept: boolean; dropped: boolean } {
+  // Overlapping ranges, an insertion strictly inside the other side's range,
+  // or two insertions at the same spot (order unknown). Merely adjacent runs
+  // do not collide.
+  const insertion = (r: BlockRun) => r.prevFrom === r.prevTo;
   const collide = (x: BlockRun, y: BlockRun) =>
     (x.prevFrom < y.prevTo && y.prevFrom < x.prevTo) ||
-    (x.prevFrom === x.prevTo && y.prevFrom <= x.prevFrom && x.prevFrom <= y.prevTo) ||
-    (y.prevFrom === y.prevTo && x.prevFrom <= y.prevFrom && y.prevFrom <= x.prevTo);
+    (insertion(x) && y.prevFrom < x.prevFrom && x.prevFrom < y.prevTo) ||
+    (insertion(y) && x.prevFrom < y.prevFrom && y.prevFrom < x.prevTo) ||
+    (insertion(x) && insertion(y) && x.prevFrom === y.prevFrom);
   const keep = a.filter((x) => !b.some((y) => collide(x, y)));
   const runs = [...keep.map((run) => ({ run, src: mine })), ...b.map((run) => ({ run, src: theirs }))].sort(
     (x, y) => x.run.prevFrom - y.run.prevFrom || x.run.prevTo - y.run.prevTo,

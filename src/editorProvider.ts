@@ -6,8 +6,6 @@ import { ImageStore, MAX_IMAGE_BYTES } from './imageStore';
 import { minimalEdit, toLF } from './textEdit';
 import type { HostToWebview, WebviewToHost } from './messaging';
 
-type FlushedChange = { frontmatter: string; body: string; syncVersion: number; changeId: number };
-
 export class MdEditorProvider implements vscode.CustomTextEditorProvider {
   public static readonly viewType = 'mdEditor.wysiwyg';
 
@@ -115,33 +113,23 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
     };
 
     // Saves from anywhere (menu, Save All, auto save on focus change) must not
-    // miss keystrokes still waiting in the webview's debounce: ask for them
-    // and hand them to VS Code as pre-save edits.
+    // miss keystrokes still waiting in the webview's debounce. Ask the webview
+    // to send them now (as a normal `change`) and hold the save until they
+    // are applied. Edits returned through waitUntil would be thrown away by
+    // VS Code if anything else touched the document meanwhile, so none are.
     let flushSeq = 0;
-    const flushWaiters = new Map<number, (change: FlushedChange | undefined) => void>();
-    const flushWebview = async (): Promise<vscode.TextEdit[]> => {
+    const flushWaiters = new Map<number, () => void>();
+    const flushWebview = async (): Promise<void> => {
       const requestId = ++flushSeq;
-      const change = await new Promise<FlushedChange | undefined>((resolve) => {
+      await new Promise<void>((resolve) => {
         flushWaiters.set(requestId, resolve);
         void post({ type: 'flush', requestId });
+        // A late reply's change still arrives as a normal `change`.
         setTimeout(() => {
-          if (flushWaiters.delete(requestId)) resolve(undefined);
+          if (flushWaiters.delete(requestId)) resolve();
         }, 1000);
       });
-      await queue; // changes sent before the flush land first
-      if (!change || change.syncVersion !== syncVersion) return [];
-      const current = document.getText();
-      const merged = documentText(current, change.frontmatter, change.body, eol());
-      const edit = minimalEdit(current, merged);
-      void post({ type: 'applied', changeId: change.changeId });
-      if (!edit) return [];
-      webviewText = merged;
-      return [
-        vscode.TextEdit.replace(
-          new vscode.Range(document.positionAt(edit.start), document.positionAt(edit.end)),
-          edit.text,
-        ),
-      ];
+      await queue;
     };
 
     const willSaveSubscription = vscode.workspace.onWillSaveTextDocument((e) => {
@@ -166,9 +154,10 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
           enqueue(() => applyChange(msg));
           break;
         case 'flushed': {
+          // Sent right after the flushed `change` (if any), which is queued by now.
           const resolve = flushWaiters.get(msg.requestId);
           flushWaiters.delete(msg.requestId);
-          resolve?.(msg.change);
+          resolve?.();
           break;
         }
         case 'saveImage': {
@@ -299,22 +288,8 @@ function validateWebviewMessage(raw: unknown): WebviewToHost | null {
         return { type: 'change', frontmatter: m.frontmatter, body: m.body, syncVersion: m.syncVersion, changeId: m.changeId };
       }
       return null;
-    case 'flushed': {
-      if (typeof m.requestId !== 'number') return null;
-      const c = m.change as Record<string, unknown> | undefined;
-      if (c === undefined) return { type: 'flushed', requestId: m.requestId };
-      if (
-        c &&
-        typeof c.frontmatter === 'string' &&
-        typeof c.body === 'string' &&
-        typeof c.syncVersion === 'number' &&
-        typeof c.changeId === 'number'
-      ) {
-        const change = { frontmatter: c.frontmatter, body: c.body, syncVersion: c.syncVersion, changeId: c.changeId };
-        return { type: 'flushed', requestId: m.requestId, change };
-      }
-      return null;
-    }
+    case 'flushed':
+      return typeof m.requestId === 'number' ? { type: 'flushed', requestId: m.requestId } : null;
     case 'saveImage': {
       // Typed arrays cross the webview boundary as typed arrays.
       const bytes = m.bytes instanceof Uint8Array ? m.bytes : null;

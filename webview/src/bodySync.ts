@@ -25,10 +25,11 @@ export interface MarkdownProcessor {
 export class BodySync {
   // Markdown the host currently holds for the body.
   text = '';
+  private children: ProseNode[] = [];
   private blocks: ProseNode[] = [];
-  // Source range in `text` of each entry of `blocks`; null when the mdast and
-  // ProseMirror top-level nodes could not be paired up.
-  private ranges: Array<[number, number]> | null = [];
+  // Source range in `text` of each entry of `blocks`, computed on first use;
+  // null when the mdast and ProseMirror top-level nodes could not be paired.
+  private ranges: Array<[number, number]> | null | undefined = [];
   // The last parse done while verifying a splice, reused by setBase.
   private parsed: { text: string; doc: ProseNode } | null = null;
 
@@ -40,15 +41,9 @@ export class BodySync {
 
   setBase(text: string, doc: ProseNode = this.parseCached(text)): ProseNode {
     this.text = text;
-    const children = childrenOf(doc);
-    const ranges = sourceRanges(this.processor, text, children.length);
-    this.blocks = [];
-    this.ranges = ranges ? [] : null;
-    children.forEach((child, i) => {
-      if (isEmptyParagraph(child)) return;
-      this.blocks.push(child);
-      if (ranges) this.ranges!.push(ranges[i]);
-    });
+    this.children = childrenOf(doc);
+    this.blocks = this.children.filter((child) => !isEmptyParagraph(child));
+    this.ranges = undefined;
     return doc;
   }
 
@@ -62,16 +57,20 @@ export class BodySync {
     const next = contentBlocks(doc);
     if (sameBlocks(next, this.blocks)) return this.text;
     const patched = this.splice(doc, next);
-    if (patched !== null) {
-      try {
-        const parsed = this.parse(patched);
-        if (sameBlocks(contentBlocks(parsed), next)) {
-          this.parsed = { text: patched, doc: parsed };
-          return patched;
-        }
-      } catch { /* fall back */ }
-    }
-    return this.toMarkdown(doc);
+    if (patched === null) return this.toMarkdown(doc);
+    let full: string | undefined;
+    try {
+      const parsed = this.parse(patched);
+      const blocks = contentBlocks(parsed);
+      // Normally the splice parses back to exactly what the editor holds. A
+      // block that does not round-trip exactly can spoil that; the splice is
+      // still right when it reads the same as rewriting the whole file would.
+      if (sameBlocks(blocks, next) || sameBlocks(blocks, contentBlocks(this.parse((full = this.toMarkdown(doc)))))) {
+        this.parsed = { text: patched, doc: parsed };
+        return patched;
+      }
+    } catch { /* fall back */ }
+    return full ?? this.toMarkdown(doc);
   }
 
   private parseCached(text: string): ProseNode {
@@ -82,8 +81,16 @@ export class BodySync {
     return contentBlocks(doc).length === 0 ? '' : this.serialize(withoutEmptyParagraphs(doc));
   }
 
+  private blockRanges(): Array<[number, number]> | null {
+    if (this.ranges === undefined) {
+      const all = sourceRanges(this.processor, this.text, this.children.length);
+      this.ranges = all && all.filter((_, i) => !isEmptyParagraph(this.children[i]));
+    }
+    return this.ranges;
+  }
+
   private splice(doc: ProseNode, next: ProseNode[]): string | null {
-    const ranges = this.ranges;
+    const ranges = this.blockRanges();
     if (!ranges) return null;
     const n = this.blocks.length;
     let text = this.text;

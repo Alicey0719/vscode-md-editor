@@ -13,7 +13,7 @@ export type HostToWebview =
 export type WebviewToHost =
   | { type: 'ready' }
   | { type: 'change'; frontmatter: string; body: string; syncVersion: number; changeId: number }
-  | { type: 'flushed'; requestId: number; change?: { frontmatter: string; body: string; syncVersion: number; changeId: number } }
+  | { type: 'flushed'; requestId: number }
   | { type: 'saveImage'; requestId: string; bytes: Uint8Array; mime: string }
   | { type: 'resolveImages'; relPaths: string[] }
   | { type: 'openLink'; url: string }

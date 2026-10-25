@@ -57,6 +57,7 @@ export function imageUploadPlugin(): Plugin<DecorationSet> {
       decorations: (state) => key.getState(state),
       handleDOMEvents: {
         paste: (view, event) => {
+          if (hasRichText(event.clipboardData)) return false;
           const files = imageFiles(event.clipboardData);
           if (files.length === 0) return false;
           event.preventDefault();
@@ -74,6 +75,16 @@ export function imageUploadPlugin(): Plugin<DecorationSet> {
       },
     },
   });
+}
+
+// Excel / Sheets / Word put a picture of the selection on the clipboard
+// next to the real content; paste that content, not the picture. (Copying an
+// image in a browser gives HTML that is just an <img>.)
+function hasRichText(data: DataTransfer | null): boolean {
+  const html = data?.getData('text/html') ?? '';
+  if (!html) return false;
+  const text = new DOMParser().parseFromString(html, 'text/html').body.textContent ?? '';
+  return text.trim().length > 0;
 }
 
 function imageFiles(data: DataTransfer | null): File[] {
@@ -106,7 +117,9 @@ export function attachCodeBlockImageHandling(root: HTMLElement, getView: () => E
     } catch { /* fall back to the selection */ }
     insertImageFiles(view, files, pos);
   };
-  root.addEventListener('paste', (e) => handle(e, e.clipboardData), true);
+  root.addEventListener('paste', (e) => {
+    if (!hasRichText(e.clipboardData)) handle(e, e.clipboardData);
+  }, true);
   root.addEventListener('drop', (e) => handle(e, e.dataTransfer), true);
 }
 

@@ -8,8 +8,8 @@
 // an externalEdit every unacknowledged change was dropped and the webview
 // re-applies it on top. `discardLocal` means the document refused the edit
 // (read-only): show the document as is. Before every save the host sends
-// `flush` and gets pending edits back in `flushed`, so no save path misses
-// the last keystrokes.
+// `flush`; the webview sends pending edits as a `change`, then `flushed`, so
+// no save path misses the last keystrokes.
 
 export type HostToWebview =
   | { type: 'init'; frontmatter: string; body: string; legacy: LegacyReport; syncVersion: number }
@@ -23,7 +23,7 @@ export type HostToWebview =
 export type WebviewToHost =
   | { type: 'ready' }
   | { type: 'change'; frontmatter: string; body: string; syncVersion: number; changeId: number }
-  | { type: 'flushed'; requestId: number; change?: { frontmatter: string; body: string; syncVersion: number; changeId: number } }
+  | { type: 'flushed'; requestId: number }
   | { type: 'saveImage'; requestId: string; bytes: Uint8Array; mime: string }
   | { type: 'resolveImages'; relPaths: string[] }
   | { type: 'openLink'; url: string }

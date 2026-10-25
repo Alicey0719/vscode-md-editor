@@ -54,12 +54,12 @@ async function bootstrap(): Promise<void> {
     const { msg } = pending;
     syncVersion = msg.syncVersion;
     // Frontmatter: an edit elsewhere wins; otherwise keep (and resend) ours.
-    const external = msg.frontmatter !== pending.confirmedFrontmatter || msg.discardLocal;
-    if (external && msg.frontmatter !== hostFrontmatterOf(frontmatterValue)) {
+    const external = !sameFrontmatter(msg.frontmatter, pending.confirmedFrontmatter) || msg.discardLocal;
+    if (external && !sameFrontmatter(msg.frontmatter, frontmatterValue)) {
       frontmatterValue = msg.frontmatter;
       frontmatterPane?.setValue(msg.frontmatter);
     }
-    frontmatterDirty = hostFrontmatterOf(frontmatterValue) !== msg.frontmatter;
+    frontmatterDirty = !sameFrontmatter(frontmatterValue, msg.frontmatter);
     if (!bodyEditor) return;
     if (bodyEditor.setMarkdown(msg.body, pending.confirmedBody, msg.discardLocal) || frontmatterDirty) scheduleChange();
     else clearTimer();
@@ -100,7 +100,7 @@ async function bootstrap(): Promise<void> {
       const i = sent.findIndex((c) => c.id === msg.changeId);
       if (i < 0) return;
       hostBody = sent[i].body;
-      hostFrontmatter = hostFrontmatterOf(sent[i].frontmatter);
+      hostFrontmatter = sent[i].frontmatter;
       sent = sent.slice(i + 1);
     } else if (msg.type === 'externalEdit') {
       // Every change still unacknowledged was dropped.
@@ -115,7 +115,8 @@ async function bootstrap(): Promise<void> {
       hostBody = msg.body;
       hostFrontmatter = msg.frontmatter;
     } else if (msg.type === 'flush') {
-      post({ type: 'flushed', requestId: msg.requestId, change: takeChange() });
+      flush();
+      post({ type: 'flushed', requestId: msg.requestId });
     }
   });
 
@@ -175,11 +176,17 @@ async function bootstrap(): Promise<void> {
     const target = e.target instanceof Node ? e.target : null;
     const inBody = target !== null && bodyEditor !== null && bodyEditor.root.contains(target);
     const inFrontmatter = target !== null && frontmatterPane !== null && frontmatterPane.root.contains(target);
-    if ((key === 'z' || key === 'y') && (inBody || inFrontmatter)) {
+    if (key === 'z' || key === 'y') {
       // The editor has its own undo history. Forwarded, the key would also run
       // VS Code's undo on the TextDocument — which can roll back edits made
-      // in the plain-text editor — and the two would fight.
+      // in the plain-text editor — and the two would fight. ProseMirror (in
+      // the body) or the textarea (frontmatter) already handled it; from
+      // anywhere else (toolbar, margins) undo the editor.
       e.stopPropagation();
+      if (!inBody && !inFrontmatter) {
+        e.preventDefault();
+        bodyEditor?.history(key === 'y' || e.shiftKey ? 'redo' : 'undo');
+      }
     } else if (key === 'k' && !e.shiftKey && inBody) {
       // Ctrl+K is also VS Code's chord prefix; keep it in the editor.
       e.preventDefault();
@@ -192,7 +199,7 @@ async function bootstrap(): Promise<void> {
 }
 
 // The host writes the frontmatter without its trailing newline (merge()).
-const hostFrontmatterOf = (value: string) => value.replace(/\n$/, '');
+const sameFrontmatter = (a: string, b: string) => a.replace(/\n$/, '') === b.replace(/\n$/, '');
 
 bootstrap().catch((e) => {
   const err = e instanceof Error ? e.stack ?? e.message : String(e);
