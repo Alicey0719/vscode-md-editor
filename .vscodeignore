@@ -5,6 +5,7 @@
 .gitignore
 .nvmrc
 .npmrc
+renovate.json
 tsconfig.json
 webview/tsconfig.json
 esbuild.js
