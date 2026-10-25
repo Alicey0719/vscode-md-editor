@@ -2,11 +2,9 @@ import * as vscode from 'vscode';
 import * as crypto from 'node:crypto';
 import { split, merge } from './frontmatter';
 import { detect } from './legacyDetect';
-import { ImageStore } from './imageStore';
+import { ImageStore, MAX_IMAGE_BYTES } from './imageStore';
 import { minimalEdit, toLF, fromLF } from './textEdit';
 import type { HostToWebview, WebviewToHost } from './messaging';
-
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 export class MdEditorProvider implements vscode.CustomTextEditorProvider {
   public static readonly viewType = 'mdEditor.wysiwyg';
@@ -38,30 +36,44 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
     // on save) must not, or the editor gets reset and loses its cursor.
     let webviewText = '';
     let syncVersion = 0;
+    // Last webview change that made it into the document (see messaging.ts).
+    let appliedChangeId = 0;
     // Edits are applied strictly in order; `change` handlers would otherwise
     // interleave across the `applyEdit` await.
     let queue: Promise<void> = Promise.resolve();
     const enqueue = (job: () => Promise<void>) => {
       queue = queue.then(job).catch((err) => console.error('[mdEditor]', err));
     };
+    let applying = false;
+    let pushPending = false;
 
     const eol = () => (document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n');
 
-    const push = (type: 'init' | 'externalEdit') => {
+    const sendDocument = (type: 'init' | 'externalEdit') => {
+      pushPending = false;
       webviewText = document.getText();
-      syncVersion += 1;
       const { frontmatter, body } = split(toLF(webviewText));
       if (type === 'init') {
         void post({ type, frontmatter, body, legacy: detect(body), syncVersion });
       } else {
-        void post({ type, frontmatter, body, syncVersion });
+        void post({ type, frontmatter, body, syncVersion, appliedChangeId });
       }
     };
 
-    const applyChange = async (msg: { frontmatter: string; body: string; syncVersion: number }) => {
+    // The document changed under the webview. Bump the version right away so
+    // queued changes based on the old text are rejected, but send the text
+    // only once an edit in flight has settled, so `appliedChangeId` is exact.
+    const externalChange = () => {
+      syncVersion += 1;
+      if (applying) pushPending = true;
+      else sendDocument('externalEdit');
+    };
+
+    const applyChange = async (msg: { frontmatter: string; body: string; syncVersion: number; changeId: number }) => {
       // Computed before the webview saw the latest external edit: applying it
-      // would silently revert that edit. The webview has already been sent the
-      // newer text and will resend its own edits on top of it.
+      // would silently revert that edit. The webview re-applies its edits on
+      // top of the newer text (it learns this one was dropped from
+      // `appliedChangeId`) and sends them again.
       if (msg.syncVersion !== syncVersion) return;
       const current = document.getText();
       const { hadFrontmatter } = split(current);
@@ -70,7 +82,10 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
         eol(),
       );
       const edit = minimalEdit(current, merged);
-      if (!edit) return;
+      if (!edit) {
+        appliedChangeId = msg.changeId;
+        return;
+      }
       webviewText = merged;
       const workspaceEdit = new vscode.WorkspaceEdit();
       workspaceEdit.replace(
@@ -78,13 +93,27 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
         new vscode.Range(document.positionAt(edit.start), document.positionAt(edit.end)),
         edit.text,
       );
-      if (!(await vscode.workspace.applyEdit(workspaceEdit))) push('externalEdit');
+      applying = true;
+      let applied = false;
+      try {
+        applied = await vscode.workspace.applyEdit(workspaceEdit);
+      } finally {
+        applying = false;
+      }
+      if (applied) {
+        appliedChangeId = msg.changeId;
+        if (pushPending) sendDocument('externalEdit');
+      } else {
+        // Rejected (the document moved on, or it is read-only): resync.
+        syncVersion += 1;
+        sendDocument('externalEdit');
+      }
     };
 
     const changeSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.toString() !== document.uri.toString()) return;
       if (e.contentChanges.length === 0 || document.getText() === webviewText) return;
-      push('externalEdit');
+      externalChange();
     });
 
     const msgSubscription = webviewPanel.webview.onDidReceiveMessage(async (raw: unknown) => {
@@ -92,7 +121,10 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
       if (!msg) return;
       switch (msg.type) {
         case 'ready':
-          push('init');
+          // A (re)loaded webview numbers its changes from 1 again.
+          syncVersion += 1;
+          appliedChangeId = 0;
+          sendDocument('init');
           break;
         case 'change':
           enqueue(() => applyChange(msg));
@@ -231,8 +263,13 @@ function validateWebviewMessage(raw: unknown): WebviewToHost | null {
     case 'ready':
       return { type: 'ready' };
     case 'change':
-      if (typeof m.frontmatter === 'string' && typeof m.body === 'string' && typeof m.syncVersion === 'number') {
-        return { type: 'change', frontmatter: m.frontmatter, body: m.body, syncVersion: m.syncVersion };
+      if (
+        typeof m.frontmatter === 'string' &&
+        typeof m.body === 'string' &&
+        typeof m.syncVersion === 'number' &&
+        typeof m.changeId === 'number'
+      ) {
+        return { type: 'change', frontmatter: m.frontmatter, body: m.body, syncVersion: m.syncVersion, changeId: m.changeId };
       }
       return null;
     case 'save':

@@ -364,6 +364,10 @@ body.vscode-high-contrast {
   background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.1));
   user-select: none;
 }
+.md-upload-replaced {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
 :root {
   --md-link-color: #4ea3ff;
   --md-link-color-hover: #7dbbff;

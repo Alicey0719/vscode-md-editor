@@ -18,18 +18,19 @@ interface Converter {
 }
 
 function converters(): Converter[] {
-  if (process.platform === 'darwin') {
-    return [{ cmd: 'sips', args: (i, o) => ['-s', 'format', 'jpeg', '-s', 'formatOptions', QUALITY, i, '--out', o] }];
-  }
   const magick: Converter = { cmd: 'magick', args: (i, o) => [`${i}[0]`, '-auto-orient', '-quality', QUALITY, o] };
   // On Windows `convert` is the built-in filesystem converter, never ImageMagick.
   if (process.platform === 'win32') return [magick];
-  return [
+  const portable: Converter[] = [
     { cmd: 'heif-dec', args: (i, o) => ['-q', QUALITY, i, o] },
     { cmd: 'heif-convert', args: (i, o) => ['-q', QUALITY, i, o] },
     magick,
     { cmd: 'convert', args: (i, o) => [`${i}[0]`, '-auto-orient', '-quality', QUALITY, o] },
   ];
+  if (process.platform === 'darwin') {
+    return [{ cmd: 'sips', args: (i, o) => ['-s', 'format', 'jpeg', '-s', 'formatOptions', QUALITY, i, '--out', o] }, ...portable];
+  }
+  return portable;
 }
 
 function run(cmd: string, args: string[]): Promise<void> {

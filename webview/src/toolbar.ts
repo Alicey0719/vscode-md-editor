@@ -1,7 +1,7 @@
 import type { Crepe } from '@milkdown/crepe';
 import { commandsCtx, editorViewCtx } from '@milkdown/core';
 import type { EditorState, Transaction } from '@milkdown/prose/state';
-import { lift } from '@milkdown/prose/commands';
+import { liftTarget } from '@milkdown/prose/transform';
 import {
   toggleStrongCommand,
   toggleEmphasisCommand,
@@ -101,7 +101,7 @@ export function createToolbar(crepe: Crepe, actions: ToolbarActions): Toolbar {
   const inCode = (s: EditorState) => s.selection.$from.parent.type.name === 'code_block';
   toggle(blocks, icon.ul, 'Bullet list', inBullet, () => call(innermostList(crepe) === 'bullet_list' ? liftListItemCommand : wrapInBulletListCommand));
   toggle(blocks, icon.ol, 'Numbered list', inOrdered, () => call(innermostList(crepe) === 'ordered_list' ? liftListItemCommand : wrapInOrderedListCommand));
-  toggle(blocks, icon.quote, 'Blockquote', inQuote, () => (isActiveNow(crepe, inQuote) ? runOnView(lift) : call(wrapInBlockquoteCommand)));
+  toggle(blocks, icon.quote, 'Blockquote', inQuote, () => (isActiveNow(crepe, inQuote) ? runOnView(unwrapQuote) : call(wrapInBlockquoteCommand)));
   toggle(blocks, icon.codeBlock, 'Code block', inCode, () => call(isActiveNow(crepe, inCode) ? turnIntoTextCommand : createCodeBlockCommand));
   bar.appendChild(blocks);
   bar.appendChild(divider());
@@ -155,6 +155,17 @@ function inNode(name: string) {
     for (let d = $from.depth; d > 0; d--) if ($from.node(d).type.name === name) return true;
     return false;
   };
+}
+
+// Take the selection out of the nearest blockquote. (`lift` would lift the
+// innermost liftable range instead, e.g. a list item out of its list.)
+function unwrapQuote(state: EditorState, dispatch: (tr: Transaction) => void): boolean {
+  const { $from, $to } = state.selection;
+  const range = $from.blockRange($to, (node) => node.type.name === 'blockquote');
+  const target = range ? liftTarget(range) : null;
+  if (!range || target === null) return false;
+  dispatch(state.tr.lift(range, target).scrollIntoView());
+  return true;
 }
 
 function innermostList(crepe: Crepe): string | null {
@@ -216,13 +227,14 @@ function styleDropdown(call: Callable, runOnView: RunOnView): { root: HTMLElemen
     if (o.value === '') el.hidden = true;
     select.appendChild(el);
   }
-  let inQuote = false;
+  // Paragraph directly in a quote, i.e. the dropdown currently shows "Quote".
+  let quoted = false;
   select.addEventListener('mousedown', (e) => e.stopPropagation());
   select.addEventListener('change', () => {
     const v = select.value;
     if (v === 'p') {
       call(turnIntoTextCommand);
-      if (inQuote) runOnView(lift);
+      if (quoted) runOnView(unwrapQuote);
     } else if (/^h[1-6]$/.test(v)) {
       call(wrapInHeadingCommand, Number(v.slice(1)));
     } else if (v === 'quote') {
@@ -237,11 +249,11 @@ function styleDropdown(call: Callable, runOnView: RunOnView): { root: HTMLElemen
   const refresh = (state: EditorState) => {
     const { $from } = state.selection;
     const parent = $from.parent;
-    inQuote = inNode('blockquote')(state);
+    quoted = parent.type.name === 'paragraph' && inNode('blockquote')(state);
     let value = '';
     if (parent.type.name === 'heading') value = `h${parent.attrs.level}`;
     else if (parent.type.name === 'code_block') value = 'code';
-    else if (parent.type.name === 'paragraph') value = inQuote ? 'quote' : 'p';
+    else if (parent.type.name === 'paragraph') value = quoted ? 'quote' : 'p';
     if (select.value !== value) select.value = value;
   };
   return { root: wrap, refresh };

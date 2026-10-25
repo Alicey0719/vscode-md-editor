@@ -343,6 +343,12 @@ body.vscode-high-contrast {
   user-select: none;
 }
 
+/* Selected text a paste will replace once the images are saved. */
+.md-upload-replaced {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
 /* Link color — higher specificity than Crepe's `.milkdown .ProseMirror a`.
  * Uses a bright blue that is legible in dark themes. */
 :root {

@@ -17,10 +17,15 @@ async function bootstrap(): Promise<void> {
   let frontmatterPane: ReturnType<typeof createFrontmatterPane> | null = null;
   let frontmatterValue = '';
   let frontmatterDirty = false;
-  // Latest body from the host and its version (see src/messaging.ts). Kept
+  // What the host last sent us and its version (see src/messaging.ts). Kept
   // even while the editor is still mounting so no update is lost.
   let hostBody = '';
+  let hostFrontmatter = '';
   let syncVersion = 0;
+  // Changes sent since the last host message; the next externalEdit says
+  // which of them were applied.
+  let sent: Array<{ id: number; body: string; frontmatter: string }> = [];
+  let nextChangeId = 0;
   let changeTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Send local edits now (debounce elapsed, focus left, or about to save).
@@ -33,7 +38,9 @@ async function bootstrap(): Promise<void> {
     const { markdown, changed } = bodyEditor.takeMarkdown();
     if (!changed && !frontmatterDirty) return;
     frontmatterDirty = false;
-    post({ type: 'change', frontmatter: frontmatterValue, body: markdown, syncVersion });
+    const changeId = ++nextChangeId;
+    sent.push({ id: changeId, body: markdown, frontmatter: frontmatterValue });
+    post({ type: 'change', frontmatter: frontmatterValue, body: markdown, syncVersion, changeId });
   };
 
   const scheduleChange = () => {
@@ -45,19 +52,30 @@ async function bootstrap(): Promise<void> {
     if (msg.type === 'init') {
       syncVersion = msg.syncVersion;
       hostBody = msg.body;
+      hostFrontmatter = msg.frontmatter;
       frontmatterValue = msg.frontmatter;
       frontmatterDirty = false;
+      sent = [];
+      nextChangeId = 0;
       void mount(msg.legacy);
     } else if (msg.type === 'externalEdit') {
+      // What the host held before this edit: our last applied change, or
+      // what it sent last time. Anything we sent after that was dropped.
+      const applied = sent.find((c) => c.id === msg.appliedChangeId);
+      const confirmedBody = applied?.body ?? hostBody;
+      const confirmedFrontmatter = applied?.frontmatter ?? hostFrontmatter;
+      sent = [];
       syncVersion = msg.syncVersion;
       hostBody = msg.body;
-      if (msg.frontmatter !== frontmatterValue) {
+      hostFrontmatter = msg.frontmatter;
+      // Frontmatter: an edit elsewhere wins; otherwise keep (and resend) ours.
+      if (msg.frontmatter !== confirmedFrontmatter && msg.frontmatter !== frontmatterValue) {
         frontmatterValue = msg.frontmatter;
-        frontmatterDirty = false;
         frontmatterPane?.setValue(msg.frontmatter);
       }
+      frontmatterDirty = frontmatterValue !== msg.frontmatter;
       if (!bodyEditor) return;
-      if (bodyEditor.setMarkdown(msg.body) || frontmatterDirty) scheduleChange();
+      if (bodyEditor.setMarkdown(msg.body, confirmedBody) || frontmatterDirty) scheduleChange();
       else if (changeTimer !== null) {
         clearTimeout(changeTimer);
         changeTimer = null;
@@ -115,7 +133,9 @@ async function bootstrap(): Promise<void> {
   // document), but before VS Code's window-level listener forwards it.
   document.addEventListener('keydown', (e) => {
     if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
-    const key = e.key.toLowerCase();
+    // Non-Latin layouts (Cyrillic, Greek, ...) report another letter in
+    // e.key; ProseMirror and VS Code fall back to the physical key, so do too.
+    const key = /^[a-z]$/i.test(e.key) ? e.key.toLowerCase() : e.code.replace(/^Key/, '').toLowerCase();
     const target = e.target instanceof Node ? e.target : null;
     const inBody = target !== null && bodyEditor !== null && bodyEditor.root.contains(target);
     const inFrontmatter = target !== null && frontmatterPane !== null && frontmatterPane.root.contains(target);

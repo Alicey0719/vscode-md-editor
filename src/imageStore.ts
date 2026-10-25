@@ -6,7 +6,7 @@ import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { heicToJpeg } from './heicConvert';
 
-const MAX_BYTES = 20 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 const HASH_LEN = 16;
 
 type Kind = 'png' | 'jpg' | 'webp' | 'gif' | 'avif' | 'heic';
@@ -29,7 +29,8 @@ const HEIF_BRANDS = new Set(['heic', 'heix', 'hevc', 'hevx', 'heim', 'heis', 'he
 function detectIsoBmff(bytes: Uint8Array): Kind | null {
   if (ascii(bytes, 4, 8) !== 'ftyp') return null;
   const boxSize = ((bytes[0] << 24) | (bytes[1] << 16) | (bytes[2] << 8) | bytes[3]) >>> 0;
-  const end = Math.min(bytes.length, Math.max(16, boxSize));
+  // The ftyp box is a few dozen bytes; never trust its size field further.
+  const end = Math.min(bytes.length, Math.max(16, boxSize), 256);
   const brands = [ascii(bytes, 8, 12)];
   for (let i = 16; i + 4 <= end; i += 4) brands.push(ascii(bytes, i, i + 4));
   if (brands.some((b) => AVIF_BRANDS.has(b))) return 'avif';
@@ -74,8 +75,8 @@ export class ImageStore {
 
   async save(bytes: Uint8Array, claimedMime: string): Promise<SaveResult> {
     if (bytes.byteLength === 0) throw new Error('empty image');
-    if (bytes.byteLength > MAX_BYTES) {
-      throw new Error(`image too large (${bytes.byteLength} > ${MAX_BYTES})`);
+    if (bytes.byteLength > MAX_IMAGE_BYTES) {
+      throw new Error(`image too large (${bytes.byteLength} > ${MAX_IMAGE_BYTES})`);
     }
 
     const kind = detectKind(bytes);

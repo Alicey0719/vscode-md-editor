@@ -12,6 +12,7 @@ import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } fro
 import { Decoration, DecorationSet, type EditorView } from '@milkdown/prose/view';
 import type { Node as ProseNode, NodeType } from '@milkdown/prose/model';
 import { saveImage, post } from './hostBridge';
+import { isEmptyParagraph } from './bodySync';
 
 const IMAGE_MIME = /^image\/(png|jpe?g|webp|gif|avif|hei[cf])$/i;
 const IMAGE_EXT = /\.(png|jpe?g|webp|gif|avif|hei[cf])$/i;
@@ -24,7 +25,9 @@ export function isImageFile(file: File): boolean {
   return (file.type === '' || file.type === 'application/octet-stream') && IMAGE_EXT.test(file.name);
 }
 
-type Meta = { add: { id: number; pos: number } } | { remove: number };
+// `replace`: the text selection the images will replace once saved. It is
+// only marked meanwhile, so a failed save leaves it untouched.
+type Meta = { add: { id: number; pos: number; replace?: { from: number; to: number } } } | { remove: number };
 
 const key = new PluginKey<DecorationSet>('mdEditorImageUpload');
 const labels = new Map<number, HTMLElement>();
@@ -39,8 +42,11 @@ export function imageUploadPlugin(): Plugin<DecorationSet> {
         set = set.map(tr.mapping, tr.doc);
         const meta = tr.getMeta(key) as Meta | undefined;
         if (meta && 'add' in meta) {
-          const dom = labels.get(meta.add.id);
-          if (dom) set = set.add(tr.doc, [Decoration.widget(meta.add.pos, dom, { id: meta.add.id })]);
+          const { id, pos, replace } = meta.add;
+          const dom = labels.get(id);
+          const decos = dom ? [Decoration.widget(pos, dom, { id })] : [];
+          if (replace) decos.push(Decoration.inline(replace.from, replace.to, { class: 'md-upload-replaced' }, { id, replace: true }));
+          set = set.add(tr.doc, decos);
         } else if (meta && 'remove' in meta) {
           set = set.remove(set.find(undefined, undefined, (spec) => spec.id === meta.remove));
         }
@@ -104,16 +110,13 @@ export function insertImageFiles(view: EditorView, files: File[], at?: number): 
   labels.set(id, label);
 
   const { selection } = view.state;
-  const tr = view.state.tr;
   let pos = at;
+  let replace: { from: number; to: number } | undefined;
   if (pos === undefined) {
-    if (selection instanceof NodeSelection) pos = selection.to;
-    else {
-      if (!selection.empty) tr.deleteSelection();
-      pos = tr.selection.from;
-    }
+    pos = selection instanceof NodeSelection ? selection.to : selection.from;
+    if (!(selection instanceof NodeSelection) && !selection.empty) replace = { from: selection.from, to: selection.to };
   }
-  view.dispatch(tr.setMeta(key, { add: { id, pos } }));
+  view.dispatch(view.state.tr.setMeta(key, { add: { id, pos, replace } }));
 
   void saveAll(files, (done) => {
     label.textContent = progressText(done, files.length);
@@ -149,21 +152,33 @@ async function saveAll(files: File[], onProgress: (done: number) => void): Promi
 function finish(view: EditorView, id: number, results: Result[]): void {
   labels.delete(id);
   if (view.isDestroyed) return;
-  const placeholder = key.getState(view.state)?.find(undefined, undefined, (spec) => spec.id === id)[0];
-  const pos = placeholder ? placeholder.from : view.state.selection.from;
+  const decos = key.getState(view.state);
+  const placeholder = decos?.find(undefined, undefined, (spec) => spec.id === id && !spec.replace)[0];
+  const replaced = decos?.find(undefined, undefined, (spec) => spec.id === id && spec.replace)[0];
+  let pos = placeholder ? placeholder.from : view.state.selection.from;
   const srcs = results.flatMap((r) => ('relPath' in r ? [r.relPath] : []));
   const tr = view.state.tr.setMeta(key, { remove: id });
-  if (srcs.length > 0) insertImageBlocks(tr, pos, srcs);
+  if (srcs.length > 0) {
+    if (replaced) {
+      tr.deleteRange(replaced.from, replaced.to);
+      pos = tr.mapping.map(pos);
+    }
+    insertImageBlocks(tr, pos, srcs);
+  }
   view.dispatch(tr.scrollIntoView());
   if (srcs.length > 0) view.focus();
 
   const failed = results.flatMap((r) => ('error' in r ? [r] : []));
   if (failed.length > 0) {
-    const names = failed.map((f) => f.name || '(clipboard)').join(', ');
+    // Keep it short: the host drops oversized messages.
+    const names =
+      failed.slice(0, 5).map((f) => f.name || '(clipboard)').join(', ') +
+      (failed.length > 5 ? ` ほか ${failed.length - 5} 件` : '');
+    const reason = failed[0].error.length > 300 ? `${failed[0].error.slice(0, 300)}…` : failed[0].error;
     post({
       type: 'notify',
       level: 'error',
-      message: `${failed.length} 枚の画像を挿入できませんでした (${names}): ${failed[0].error}`,
+      message: `${failed.length} 枚の画像を挿入できませんでした (${names}): ${reason}`,
     });
   }
 }
@@ -184,22 +199,25 @@ export function insertImageBlocks(tr: Transaction, pos: number, srcs: string[]):
   // (the empty paragraph or the text after the split) instead of a new one.
   let continueAfter = false;
   if (parent.isTextblock) {
-    const nested = $pos.depth > 1;
-    if (parent.type.spec.code || !canInsert(tr.doc, $pos.after(), imageType)) {
-      // Code blocks and table cells cannot hold an image block: go after the
-      // enclosing top-level block instead.
-      insertAt = nested ? $pos.after(1) : $pos.after();
-    } else if (parent.content.size === 0 || $pos.parentOffset === 0) {
+    const atStart = $pos.parentOffset === 0;
+    const atEnd = $pos.parentOffset === parent.content.size;
+    if (parent.type.spec.code) {
+      insertAt = $pos.after();
+    } else if (atStart && canInsert(tr.doc, $pos.before(), imageType)) {
       insertAt = $pos.before();
       continueAfter = true;
-    } else if ($pos.parentOffset === parent.content.size) {
-      insertAt = $pos.after();
-    } else {
+    } else if (!atStart && !atEnd && parent.type.name === 'paragraph' && canInsert(tr.doc, $pos.after(), imageType)) {
       tr.split(pos);
       insertAt = pos + 1;
       continueAfter = true;
+    } else {
+      // End of the block, mid-heading (never split a heading), or the first
+      // paragraph of a list item, which must stay first.
+      insertAt = $pos.after();
     }
   }
+  // Table cells and the like cannot hold an image block: go after the
+  // enclosing top-level block instead.
   if (!canInsert(tr.doc, insertAt, imageType)) {
     const $at = tr.doc.resolve(insertAt);
     insertAt = $at.depth > 0 ? $at.after(1) : insertAt;
@@ -224,5 +242,3 @@ function canInsert(doc: ProseNode, pos: number, type: NodeType): boolean {
   const index = $pos.index();
   return $pos.parent.canReplaceWith(index, index, type);
 }
-
-const isEmptyParagraph = (node: ProseNode) => node.type.name === 'paragraph' && node.content.size === 0;

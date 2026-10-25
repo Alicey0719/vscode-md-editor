@@ -9,10 +9,8 @@ import {
 import type { Ctx } from '@milkdown/ctx';
 import { $prose } from '@milkdown/kit/utils';
 import { linkTooltipAPI } from '@milkdown/kit/component/link-tooltip';
-import { headingIdGenerator } from '@milkdown/preset-commonmark';
 import { Plugin } from '@milkdown/prose/state';
-import { Transform } from '@milkdown/prose/transform';
-import type { Node as ProseNode } from '@milkdown/prose/model';
+import { Fragment, type Node as ProseNode } from '@milkdown/prose/model';
 import type { EditorView } from '@milkdown/prose/view';
 import '@milkdown/crepe/theme/common/style.css';
 // Default to the dark frame theme (matches VSCode's default palette). Light theme
@@ -22,15 +20,15 @@ import '@milkdown/crepe/theme/frame-dark.css';
 import { saveImage, resolveImageUri, post } from './hostBridge';
 import { createToolbar, type Toolbar } from './toolbar';
 import { patchImageBlockSerialization } from './imageBlockPatch';
-import { BodySync, keepEditorBlankLines } from './bodySync';
+import { BodySync, blockRuns, childrenOf, contentBlocks, isEmptyParagraph, type BlockRun } from './bodySync';
 import { imageUploadPlugin, pickImageFiles } from './imageInsert';
 import { linkRangeAt } from './links';
-import { applyEdit, minimalEdit } from '../../src/textEdit';
 
 export interface BodyEditor {
-  // Show markdown from the host. Returns true when local edits that the host
-  // has not seen yet survived (rebased onto the new text) and must be sent.
-  setMarkdown: (markdown: string) => boolean;
+  // Show markdown from the host. `confirmed` is the body the host held before
+  // this change as far as we know (our last applied change). Returns true
+  // when local edits the host does not have survived and must be (re)sent.
+  setMarkdown: (markdown: string, confirmed?: string) => boolean;
   // Markdown to send to the host; `changed` is false when it already has it.
   takeMarkdown: () => { markdown: string; changed: boolean };
   onChange: (cb: () => void) => void;
@@ -103,59 +101,95 @@ export async function createBodyEditor(host: HTMLElement): Promise<BodyEditor> {
 
   const withCtx = <T,>(fn: (ctx: Ctx) => T): T => crepe.editor.action(fn);
   const view = (): EditorView => withCtx((ctx) => ctx.get(editorViewCtx));
-  const parse = (markdown: string): ProseNode =>
-    withCtx((ctx) => withHeadingIds(ctx.get(parserCtx)(markdown), ctx.get(headingIdGenerator.key)));
+  const parse = (markdown: string): ProseNode => withCtx((ctx) => ctx.get(parserCtx)(markdown));
   const sync = withCtx(
     (ctx) => new BodySync(parse, (doc) => ctx.get(serializerCtx)(doc), ctx.get(remarkCtx)),
   );
 
-  // Replace only the part of the document that differs, so the selection (and
-  // the node views around it) survive. Not added to the undo history: Ctrl+Z
-  // must undo the user's own edits, not changes made in another editor.
+  // Bring the editor to `incoming` by replacing only the blocks that differ,
+  // so the selection, node views and the user's blank lines elsewhere
+  // survive. Not added to the undo history: Ctrl+Z must undo the user's own
+  // edits, not changes made in another editor.
   const showDoc = (incoming: ProseNode) => {
     const v = view();
     const doc = v.state.doc;
-    const next = keepEditorBlankLines(doc, incoming);
-    const start = doc.content.findDiffStart(next.content);
-    if (start === null) return;
-    let { a: endA, b: endB } = doc.content.findDiffEnd(next.content)!;
-    const overlap = start - Math.min(endA, endB);
-    if (overlap > 0) {
-      endA += overlap;
-      endB += overlap;
+    const cur = childrenOf(doc);
+    const inc = childrenOf(incoming);
+    const curIdx = contentIndices(cur);
+    const incIdx = contentIndices(inc);
+    const runs = blockRuns(curIdx.map((i) => cur[i]), incIdx.map((i) => inc[i]));
+    if (runs.length === 0) return;
+
+    const starts: number[] = [];
+    let pos = 0;
+    for (const child of cur) {
+      starts.push(pos);
+      pos += child.nodeSize;
     }
-    const tr = v.state.tr.replace(start, endA, next.slice(start, endB)).setMeta('addToHistory', false);
+    starts.push(pos);
+
+    const tr = v.state.tr;
+    for (const run of [...runs].reverse()) {
+      let from: number;
+      let to: number;
+      let replacement: ProseNode[];
+      if (curIdx.length === 0) {
+        // Nothing to anchor to (first load): take the incoming document whole.
+        [from, to, replacement] = [0, cur.length, inc];
+      } else {
+        from =
+          run.prevFrom < run.prevTo ? curIdx[run.prevFrom] : run.prevFrom > 0 ? curIdx[run.prevFrom - 1] + 1 : curIdx[0];
+        to = run.prevFrom < run.prevTo ? curIdx[run.prevTo - 1] + 1 : from;
+        replacement = run.nextFrom < run.nextTo ? inc.slice(incIdx[run.nextFrom], incIdx[run.nextTo - 1] + 1) : [];
+      }
+      // Within the run, narrow down to the characters that changed.
+      const before = Fragment.fromArray(cur.slice(from, to));
+      const after = Fragment.fromArray(replacement);
+      const start = before.findDiffStart(after);
+      if (start === null) continue;
+      let { a: endA, b: endB } = before.findDiffEnd(after)!;
+      const overlap = start - Math.min(endA, endB);
+      if (overlap > 0) {
+        endA += overlap;
+        endB += overlap;
+      }
+      tr.replace(starts[from] + start, starts[from] + endA, doc.type.create(null, after).slice(start, endB));
+    }
+    if (!tr.docChanged) return;
     syncing = true;
     try {
-      v.dispatch(tr);
+      v.dispatch(tr.setMeta('addToHistory', false));
     } finally {
       syncing = false;
     }
   };
 
-  const setMarkdown = (markdown: string): boolean => {
-    const base = sync.text;
-    const local = sync.render(view().state.doc);
-    const incoming = parse(markdown);
-    // Formatting-only change on the host side (format on save, ...).
-    const sameContent = sync.matchesBase(incoming);
-    sync.setBase(markdown, incoming);
-
-    if (local === base) {
-      if (!sync.matchesBase(view().state.doc)) showDoc(incoming);
+  const setMarkdown = (markdown: string, confirmed: string = sync.text): boolean => {
+    const doc = view().state.doc;
+    const base = sync.blocksOf(confirmed);
+    const incoming = sync.setBase(markdown, parse(markdown));
+    const local = contentBlocks(doc);
+    const mine = blockRuns(base, local);
+    if (mine.length === 0) {
+      showDoc(incoming);
       return false;
     }
-    // Both sides changed. Keep the unsent local edits unless they collide
-    // with the external one; on a collision the document wins.
-    if (sameContent) return true;
-    const mine = minimalEdit(base, local);
-    const theirs = minimalEdit(base, markdown);
-    if (mine && theirs && (mine.end <= theirs.start || theirs.end <= mine.start)) {
-      const [first, second] = mine.start < theirs.start ? [mine, theirs] : [theirs, mine];
-      showDoc(parse(applyEdit(applyEdit(base, second), first)));
+    const external = contentBlocks(incoming);
+    const theirs = blockRuns(base, external);
+    // Formatting-only change on the host side (format on save, ...): keep
+    // the editor as is; the local edits are resent against the new text.
+    if (theirs.length === 0) return true;
+    const merged = mergeRuns(base, local, external, mine, theirs);
+    if (merged) {
+      showDoc(doc.type.create(null, Fragment.fromArray(merged)));
       return true;
     }
     showDoc(incoming);
+    post({
+      type: 'notify',
+      level: 'warn',
+      message: '別のエディタで同じ箇所が変更されたため、こちらの未反映の編集を取り消しました。',
+    });
     return false;
   };
 
@@ -196,25 +230,33 @@ export async function createBodyEditor(host: HTMLElement): Promise<BodyEditor> {
   };
 }
 
-// Milkdown's syncHeadingIdPlugin gives every heading in the editor an `id`
-// derived from its text, but freshly parsed documents carry `id: ''`. Assign
-// them the same way (including the `-#2` suffix for duplicates) so parsed and
-// edited documents compare equal and external updates diff minimally.
-function withHeadingIds(doc: ProseNode, getId: (node: ProseNode) => string): ProseNode {
-  const tr = new Transform(doc);
-  const seen: Record<string, number> = {};
-  doc.descendants((node, pos) => {
-    if (node.type.name !== 'heading' || node.textContent.trim().length === 0) return;
-    let id = getId(node);
-    if (seen[id]) {
-      seen[id] += 1;
-      id += `-#${seen[id]}`;
-    } else {
-      seen[id] = 1;
-    }
-    if (node.attrs.id !== id) tr.setNodeMarkup(pos, undefined, { ...node.attrs, id });
-  });
-  return tr.doc;
+const contentIndices = (nodes: ProseNode[]) => nodes.flatMap((node, i) => (isEmptyParagraph(node) ? [] : [i]));
+
+// Apply both sides' block changes to `base` when they touch different blocks;
+// null when they collide.
+function mergeRuns(
+  base: ProseNode[],
+  mine: ProseNode[],
+  theirs: ProseNode[],
+  a: BlockRun[],
+  b: BlockRun[],
+): ProseNode[] | null {
+  const collide = (x: BlockRun, y: BlockRun) =>
+    (x.prevFrom < y.prevTo && y.prevFrom < x.prevTo) ||
+    (x.prevFrom === x.prevTo && y.prevFrom <= x.prevFrom && x.prevFrom <= y.prevTo) ||
+    (y.prevFrom === y.prevTo && x.prevFrom <= y.prevFrom && y.prevFrom <= x.prevTo);
+  if (a.some((x) => b.some((y) => collide(x, y)))) return null;
+  const runs = [...a.map((run) => ({ run, src: mine })), ...b.map((run) => ({ run, src: theirs }))].sort(
+    (x, y) => x.run.prevFrom - y.run.prevFrom || x.run.prevTo - y.run.prevTo,
+  );
+  const out: ProseNode[] = [];
+  let i = 0;
+  for (const { run, src } of runs) {
+    out.push(...base.slice(i, run.prevFrom), ...src.slice(run.nextFrom, run.nextTo));
+    i = run.prevTo;
+  }
+  out.push(...base.slice(i));
+  return out.length > 0 ? out : null;
 }
 
 function attachLinkClickHandler(root: HTMLElement): void {
