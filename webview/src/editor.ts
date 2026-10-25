@@ -1,36 +1,60 @@
 import { Crepe } from '@milkdown/crepe';
-import { editorViewCtx, parserCtx } from '@milkdown/core';
-import { splitBlock } from '@milkdown/prose/commands';
+import {
+  commandsCtx,
+  editorViewCtx,
+  parserCtx,
+  remarkCtx,
+  remarkStringifyOptionsCtx,
+  serializerCtx,
+} from '@milkdown/core';
+import type { Ctx } from '@milkdown/ctx';
+import { $prose } from '@milkdown/kit/utils';
+import { linkTooltipAPI } from '@milkdown/kit/component/link-tooltip';
+import { redoCommand, undoCommand } from '@milkdown/kit/plugin/history';
+import { Plugin } from '@milkdown/prose/state';
+import { Fragment, type Node as ProseNode } from '@milkdown/prose/model';
+import type { EditorView } from '@milkdown/prose/view';
 import '@milkdown/crepe/theme/common/style.css';
 // Default to the dark frame theme (matches VSCode's default palette). Light theme
 // vars are re-declared in styles.css scoped to `body.vscode-light`.
 import '@milkdown/crepe/theme/frame-dark.css';
 
 import { saveImage, resolveImageUri, post } from './hostBridge';
-import { createToolbar } from './toolbar';
+import { createToolbar, type Toolbar } from './toolbar';
 import { patchImageBlockSerialization } from './imageBlockPatch';
-
-const IMAGE_MIME = /^image\/(png|jpeg|jpg|webp|gif)$/i;
+import { BodySync, blockRuns, childrenOf, contentBlocks, isEmptyParagraph, type BlockRun } from './bodySync';
+import { attachCodeBlockImageHandling, imageUploadPlugin, pickImageFiles } from './imageInsert';
+import { linkRangeAt } from './links';
 
 export interface BodyEditor {
-  getMarkdown: () => string;
-  setMarkdown: (markdown: string) => void;
-  onChange: (cb: (markdown: string) => void) => void;
+  // Show markdown from the host. `confirmed` is the body the host held before
+  // this change as far as we know (our last applied change); `discard` drops
+  // local edits instead of keeping them. Returns true when local edits the
+  // host does not have survived and must be (re)sent.
+  setMarkdown: (markdown: string, confirmed?: string, discard?: boolean) => boolean;
+  // Markdown to send to the host; `changed` is false when it already has it.
+  takeMarkdown: () => { markdown: string; changed: boolean };
+  onChange: (cb: () => void) => void;
+  editLink: () => void;
+  history: (action: 'undo' | 'redo') => void;
   toolbar: HTMLElement;
   root: HTMLElement;
   destroy: () => Promise<void>;
 }
 
-export async function createBodyEditor(host: HTMLElement, initial: string): Promise<BodyEditor> {
+export async function createBodyEditor(host: HTMLElement): Promise<BodyEditor> {
   host.classList.add('md-paper');
 
-  let latest = initial;
-  const changeCallbacks: Array<(m: string) => void> = [];
-  let suppressChange = false;
+  const changeCallbacks: Array<() => void> = [];
+  let toolbar: Toolbar | null = null;
+  // Set while host content is being applied, so it is not echoed back.
+  let syncing = false;
 
   const crepe = new Crepe({
     root: host,
-    defaultValue: initial,
+    // Content is set after the image-block patch below, so the first parse
+    // already maps `alt` to the caption.
+    defaultValue: '',
     features: {
       [Crepe.Feature.Latex]: false,
       [Crepe.Feature.Toolbar]: false,
@@ -57,43 +81,157 @@ export async function createBodyEditor(host: HTMLElement, initial: string): Prom
     },
   });
 
+  crepe.editor
+    // `-` is what most hand-written markdown and formatters (Prettier,
+    // markdownlint) use; Milkdown defaults to `*`.
+    .config((ctx) => ctx.update(remarkStringifyOptionsCtx, (options) => ({ ...options, bullet: '-' as const })))
+    .use($prose(() => imageUploadPlugin()))
+    .use(
+      $prose(
+        () =>
+          new Plugin({
+            view: () => ({
+              update: (view, prev) => {
+                toolbar?.refresh(view.state);
+                if (!syncing && view.state.doc !== prev.doc) for (const cb of changeCallbacks) cb();
+              },
+            }),
+          }),
+      ),
+    );
+
   await crepe.create();
   patchImageBlockSerialization(crepe);
 
-  crepe.on((listener) => {
-    listener.markdownUpdated((_ctx, markdown) => {
-      const cleaned = stripEmptyBrLines(markdown);
-      latest = cleaned;
-      if (suppressChange) return;
-      for (const cb of changeCallbacks) cb(cleaned);
+  const withCtx = <T,>(fn: (ctx: Ctx) => T): T => crepe.editor.action(fn);
+  const view = (): EditorView => withCtx((ctx) => ctx.get(editorViewCtx));
+  const parse = (markdown: string): ProseNode => withCtx((ctx) => ctx.get(parserCtx)(markdown));
+  const sync = withCtx(
+    (ctx) => new BodySync(parse, (doc) => ctx.get(serializerCtx)(doc), ctx.get(remarkCtx)),
+  );
+
+  // Bring the editor to `incoming` by replacing only the blocks that differ,
+  // so the selection, node views and the user's blank lines elsewhere
+  // survive. Not added to the undo history: Ctrl+Z must undo the user's own
+  // edits, not changes made in another editor.
+  const showDoc = (incoming: ProseNode) => {
+    const v = view();
+    const doc = v.state.doc;
+    const cur = childrenOf(doc);
+    const inc = childrenOf(incoming);
+    const curIdx = contentIndices(cur);
+    const incIdx = contentIndices(inc);
+    const runs = blockRuns(curIdx.map((i) => cur[i]), incIdx.map((i) => inc[i]));
+    if (runs.length === 0) return;
+
+    const starts: number[] = [];
+    let pos = 0;
+    for (const child of cur) {
+      starts.push(pos);
+      pos += child.nodeSize;
+    }
+    starts.push(pos);
+
+    const tr = v.state.tr;
+    for (const run of [...runs].reverse()) {
+      let from: number;
+      let to: number;
+      let replacement: ProseNode[];
+      if (curIdx.length === 0) {
+        // Nothing to anchor to (first load): take the incoming document whole.
+        [from, to, replacement] = [0, cur.length, inc];
+      } else {
+        from =
+          run.prevFrom < run.prevTo ? curIdx[run.prevFrom] : run.prevFrom > 0 ? curIdx[run.prevFrom - 1] + 1 : curIdx[0];
+        to = run.prevFrom < run.prevTo ? curIdx[run.prevTo - 1] + 1 : from;
+        replacement = run.nextFrom < run.nextTo ? inc.slice(incIdx[run.nextFrom], incIdx[run.nextTo - 1] + 1) : [];
+      }
+      // Within the run, narrow down to the characters that changed.
+      const before = Fragment.fromArray(cur.slice(from, to));
+      const after = Fragment.fromArray(replacement);
+      const start = before.findDiffStart(after);
+      if (start === null) continue;
+      let { a: endA, b: endB } = before.findDiffEnd(after)!;
+      const overlap = start - Math.min(endA, endB);
+      if (overlap > 0) {
+        endA += overlap;
+        endB += overlap;
+      }
+      tr.replace(starts[from] + start, starts[from] + endA, doc.type.create(null, after).slice(start, endB));
+    }
+    if (!tr.docChanged) return;
+    syncing = true;
+    try {
+      v.dispatch(tr.setMeta('addToHistory', false));
+    } finally {
+      syncing = false;
+    }
+  };
+
+  const setMarkdown = (markdown: string, confirmed: string = sync.text, discard = false): boolean => {
+    const doc = view().state.doc;
+    const base = sync.blocksOf(confirmed);
+    const incoming = sync.setBase(markdown, parse(markdown));
+    const local = contentBlocks(doc);
+    const mine = blockRuns(base, local);
+    if (discard || mine.length === 0) {
+      showDoc(incoming);
+      return false;
+    }
+    const external = contentBlocks(incoming);
+    const theirs = blockRuns(base, external);
+    // Formatting-only change on the host side (format on save, ...): keep
+    // the editor as is; the local edits are resent against the new text.
+    if (theirs.length === 0) return true;
+    const { blocks, kept, dropped } = mergeRuns(base, local, external, mine, theirs);
+    showDoc(doc.type.createAndFill(null, Fragment.fromArray(blocks)) ?? incoming);
+    if (dropped) {
+      post({
+        type: 'notify',
+        level: 'warn',
+        message: '別のエディタで同じ箇所が変更されたため、その箇所のこちらの未反映の編集を取り消しました。',
+      });
+    }
+    return kept;
+  };
+
+  const editLink = () =>
+    withCtx((ctx) => {
+      const v = ctx.get(editorViewCtx);
+      if (!v.hasFocus()) v.focus();
+      const api = ctx.get(linkTooltipAPI.key);
+      const { from, to } = v.state.selection;
+      const link = linkRangeAt(v.state);
+      if (link) api.editLink(link.mark, link.from, link.to);
+      else api.addLink(from, to);
     });
-  });
 
-  attachPasteHandler(host, crepe);
   attachLinkClickHandler(host);
+  attachCodeBlockImageHandling(host, view);
 
-  const toolbar = createToolbar(crepe);
+  toolbar = createToolbar(crepe, {
+    editLink,
+    insertImage: () => pickImageFiles(view()),
+  });
+  toolbar.refresh(view().state);
 
   return {
-    toolbar: toolbar.root,
-    getMarkdown: () => latest,
-    setMarkdown: (markdown: string) => {
-      suppressChange = true;
-      try {
-        crepe.editor.action((ctx) => {
-          const view = ctx.get(editorViewCtx);
-          const parser = ctx.get(parserCtx);
-          const doc = parser(markdown);
-          if (!doc) return;
-          const tr = view.state.tr.replaceWith(0, view.state.doc.content.size, doc.content);
-          view.dispatch(tr);
-        });
-        latest = markdown;
-      } finally {
-        suppressChange = false;
-      }
+    setMarkdown,
+    takeMarkdown: () => {
+      const markdown = sync.render(view().state.doc);
+      if (markdown === sync.text) return { markdown, changed: false };
+      sync.setBase(markdown);
+      return { markdown, changed: true };
     },
     onChange: (cb) => changeCallbacks.push(cb),
+    editLink,
+    history: (action) =>
+      withCtx((ctx) => {
+        const v = ctx.get(editorViewCtx);
+        v.focus();
+        ctx.get(commandsCtx).call((action === 'undo' ? undoCommand : redoCommand).key);
+      }),
+    toolbar: toolbar.root,
     root: host,
     destroy: async () => {
       await crepe.destroy();
@@ -101,107 +239,56 @@ export async function createBodyEditor(host: HTMLElement, initial: string): Prom
   };
 }
 
-function attachPasteHandler(root: HTMLElement, crepe: Crepe): void {
-  const handleFiles = async (files: FileList | File[] | null | undefined, ev: Event) => {
-    if (!files || files.length === 0) return false;
-    const images: File[] = [];
-    for (const f of Array.from(files as ArrayLike<File>)) {
-      if (IMAGE_MIME.test(f.type)) images.push(f);
-    }
-    if (images.length === 0) return false;
-    ev.preventDefault();
-    ev.stopPropagation();
-    for (let i = 0; i < images.length; i++) {
-      const file = images[i];
-      try {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        const { relPath } = await saveImage(bytes, file.type);
-        insertImage(crepe, relPath);
-        // Multiple images should land on separate lines. After each image
-        // except the last, split the paragraph so the next image lands in a
-        // fresh empty paragraph below.
-        if (i < images.length - 1) {
-          splitCurrentBlock(crepe);
-        }
-      } catch (err) {
-        console.error('image save failed', err);
-      }
-    }
-    return true;
-  };
+const contentIndices = (nodes: ProseNode[]) => nodes.flatMap((node, i) => (isEmptyParagraph(node) ? [] : [i]));
 
-  root.addEventListener('paste', (e) => {
-    const cd = e.clipboardData;
-    if (!cd) return;
-    const files: File[] = [];
-    for (const item of Array.from(cd.items)) {
-      if (item.kind === 'file') {
-        const f = item.getAsFile();
-        if (f) files.push(f);
-      }
-    }
-    if (files.length > 0) void handleFiles(files, e);
-  }, true);
-
-  root.addEventListener('drop', (e) => {
-    const files = e.dataTransfer?.files;
-    if (files && files.length > 0) void handleFiles(files, e);
-  }, true);
-}
-
-// Milkdown's paragraph handler emits `<br />` on its own line for empty
-// paragraphs when `remarkPreserveEmptyLinePlugin` is registered
-// (see @milkdown/preset-commonmark paragraph toMarkdown). Strip those so saved
-// files stay clean markdown. Also normalizes lookalike variants (`<br>`,
-// `<br/>`, `<br >`) that show up in some contexts.
-function stripEmptyBrLines(markdown: string): string {
-  return markdown.replace(/^[ \t]*<br\s*\/?>[ \t]*(?:\r?\n)?/gm, '');
+// Apply both sides' block changes to `base`. Where a local run collides with
+// an external one the document wins and that local run is dropped; local
+// runs elsewhere are kept.
+function mergeRuns(
+  base: ProseNode[],
+  mine: ProseNode[],
+  theirs: ProseNode[],
+  a: BlockRun[],
+  b: BlockRun[],
+): { blocks: ProseNode[]; kept: boolean; dropped: boolean } {
+  // Overlapping ranges, an insertion strictly inside the other side's range,
+  // or two insertions at the same spot (order unknown). Merely adjacent runs
+  // do not collide.
+  const insertion = (r: BlockRun) => r.prevFrom === r.prevTo;
+  const collide = (x: BlockRun, y: BlockRun) =>
+    (x.prevFrom < y.prevTo && y.prevFrom < x.prevTo) ||
+    (insertion(x) && y.prevFrom < x.prevFrom && x.prevFrom < y.prevTo) ||
+    (insertion(y) && x.prevFrom < y.prevFrom && y.prevFrom < x.prevTo) ||
+    (insertion(x) && insertion(y) && x.prevFrom === y.prevFrom);
+  const keep = a.filter((x) => !b.some((y) => collide(x, y)));
+  const runs = [...keep.map((run) => ({ run, src: mine })), ...b.map((run) => ({ run, src: theirs }))].sort(
+    (x, y) => x.run.prevFrom - y.run.prevFrom || x.run.prevTo - y.run.prevTo,
+  );
+  const blocks: ProseNode[] = [];
+  let i = 0;
+  for (const { run, src } of runs) {
+    blocks.push(...base.slice(i, run.prevFrom), ...src.slice(run.nextFrom, run.nextTo));
+    i = run.prevTo;
+  }
+  blocks.push(...base.slice(i));
+  return { blocks, kept: keep.length > 0, dropped: keep.length < a.length };
 }
 
 function attachLinkClickHandler(root: HTMLElement): void {
-  // Default click on a link should behave like a text edit (cursor placement),
-  // not navigate away. Shift/Cmd/Ctrl+click opens the URL in the external
-  // browser. Must stopPropagation on ALL clicks so VSCode webview's built-in
-  // <a href> auto-navigator (which bubbles up to <body>) never fires; and must
-  // hook mousedown too because that is where the navigator actually latches.
-  const intercept = (e: MouseEvent, allowHostAction: boolean) => {
-    const target = e.target;
-    if (!(target instanceof Element)) return;
-    const anchor = target.closest('a');
+  // VS Code's webview host opens every clicked <a href> externally, from a
+  // window-level listener. Stop link clicks before they reach it — in the
+  // bubble phase, so ProseMirror still places the caret inside the link text
+  // (that is how a link gets edited). Ctrl/Cmd+click opens the link; links in
+  // Crepe's hover preview open on a plain click.
+  const intercept = (e: MouseEvent) => {
+    const anchor = e.target instanceof Element ? e.target.closest('a[href]') : null;
     if (!anchor) return;
-    const href = anchor.getAttribute('href') ?? '';
-    if (!href) return;
     e.preventDefault();
     e.stopPropagation();
-    e.stopImmediatePropagation();
-    if (allowHostAction && (e.shiftKey || e.metaKey || e.ctrlKey)) {
-      post({ type: 'openLink', url: href });
-    }
+    const inDocument = anchor.closest('.ProseMirror') !== null;
+    const open = e.type === 'click' && (!inDocument || e.ctrlKey || e.metaKey);
+    if (open) post({ type: 'openLink', url: anchor.getAttribute('href') ?? '' });
   };
-  root.addEventListener('click', (e) => intercept(e, true), true);
-  root.addEventListener('mousedown', (e) => intercept(e, false), true);
-  root.addEventListener('auxclick', (e) => intercept(e, true), true);
-}
-
-function insertImage(crepe: Crepe, src: string): void {
-  crepe.editor.action((ctx) => {
-    const view = ctx.get(editorViewCtx);
-    const { state } = view;
-    const imageType = state.schema.nodes.image;
-    if (!imageType) {
-      console.warn('image node not in schema, falling back to text');
-      view.dispatch(state.tr.insertText(`![](${src})`));
-      return;
-    }
-    const node = imageType.create({ src, alt: '' });
-    const tr = state.tr.replaceSelectionWith(node, false);
-    view.dispatch(tr);
-  });
-}
-
-function splitCurrentBlock(crepe: Crepe): void {
-  crepe.editor.action((ctx) => {
-    const view = ctx.get(editorViewCtx);
-    splitBlock(view.state, view.dispatch);
-  });
+  root.addEventListener('click', intercept);
+  root.addEventListener('auxclick', intercept);
 }

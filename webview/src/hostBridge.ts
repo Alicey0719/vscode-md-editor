@@ -34,10 +34,12 @@ export function nextRequestId(): string {
   return `${Date.now().toString(36)}-${counter}`;
 }
 
+const uriCache = new Map<string, string>();
 const pending = new Map<string, { resolve: (r: { relPath: string; displayUri: string }) => void; reject: (e: Error) => void }>();
 
 onMessage((msg) => {
   if (msg.type === 'imageSaved') {
+    uriCache.set(msg.relPath, msg.displayUri);
     const p = pending.get(msg.requestId);
     if (p) {
       pending.delete(msg.requestId);
@@ -52,32 +54,37 @@ onMessage((msg) => {
   }
 });
 
+// Same limit as src/imageStore.ts. The host drops larger messages unanswered,
+// so reject here instead of waiting for the timeout.
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+// Typed arrays cross the webview boundary as binary; spreading them into a
+// number[] made every pasted image ~4x larger and slow to serialize.
 export function saveImage(bytes: Uint8Array, mime: string): Promise<{ relPath: string; displayUri: string }> {
+  if (bytes.byteLength > MAX_IMAGE_BYTES) return Promise.reject(new Error('画像が大きすぎます (20MB まで)'));
   const requestId = nextRequestId();
   return new Promise((resolve, reject) => {
     pending.set(requestId, { resolve, reject });
-    post({
-      type: 'saveImage',
-      requestId,
-      bytes: Array.from(bytes),
-      mime,
-    });
+    post({ type: 'saveImage', requestId, bytes, mime });
+    // Generous: HEIC conversion runs an external tool on the host.
     setTimeout(() => {
       if (pending.has(requestId)) {
         pending.delete(requestId);
         reject(new Error('timeout'));
       }
-    }, 30000);
+    }, 120000);
   });
 }
 
-const uriCache = new Map<string, string>();
 const uriWaiters = new Map<string, Array<(uri: string | null) => void>>();
+// Paths asked for and not answered yet, so each is requested once.
+const requested = new Set<string>();
 
 onMessage((msg) => {
   if (msg.type === 'imageUris') {
     for (const { relPath, displayUri } of msg.entries) {
       uriCache.set(relPath, displayUri);
+      requested.delete(relPath);
       const waiters = uriWaiters.get(relPath);
       if (waiters) {
         uriWaiters.delete(relPath);
@@ -87,6 +94,17 @@ onMessage((msg) => {
   }
 });
 
+// Webview URIs for img/... paths: one cache for the image-block proxy and
+// the DOM rewriter.
+export const cachedImageUri = (relPath: string): string | undefined => uriCache.get(relPath);
+
+export function requestImageUris(relPaths: string[]): void {
+  const need = relPaths.filter((p) => !uriCache.has(p) && !requested.has(p));
+  if (need.length === 0) return;
+  need.forEach((p) => requested.add(p));
+  post({ type: 'resolveImages', relPaths: need });
+}
+
 export function resolveImageUri(relPath: string): Promise<string | null> {
   const cached = uriCache.get(relPath);
   if (cached) return Promise.resolve(cached);
@@ -94,19 +112,16 @@ export function resolveImageUri(relPath: string): Promise<string | null> {
     const waiters = uriWaiters.get(relPath) ?? [];
     waiters.push(resolve);
     uriWaiters.set(relPath, waiters);
-    post({ type: 'resolveImages', relPaths: [relPath] });
+    requestImageUris([relPath]);
     setTimeout(() => {
       const list = uriWaiters.get(relPath);
       if (list && list.includes(resolve)) {
         const filtered = list.filter((r) => r !== resolve);
         if (filtered.length === 0) uriWaiters.delete(relPath);
         else uriWaiters.set(relPath, filtered);
+        requested.delete(relPath);
         resolve(null);
       }
     }, 5000);
   });
-}
-
-export function primeImageUris(entries: Array<{ relPath: string; displayUri: string }>): void {
-  for (const { relPath, displayUri } of entries) uriCache.set(relPath, displayUri);
 }

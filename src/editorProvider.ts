@@ -1,8 +1,9 @@
 import * as vscode from 'vscode';
 import * as crypto from 'node:crypto';
-import { split, merge } from './frontmatter';
+import { split, documentText } from './frontmatter';
 import { detect } from './legacyDetect';
-import { ImageStore } from './imageStore';
+import { ImageStore, MAX_IMAGE_BYTES } from './imageStore';
+import { minimalEdit, toLF } from './textEdit';
 import type { HostToWebview, WebviewToHost } from './messaging';
 
 export class MdEditorProvider implements vscode.CustomTextEditorProvider {
@@ -28,22 +29,117 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
 
     webviewPanel.webview.html = this.renderHtml(webviewPanel.webview);
 
-    let selfWriting = false;
-    let lastText = document.getText();
-
-    const pushInit = () => {
-      const { frontmatter, body } = split(document.getText());
-      const legacy = detect(body);
-      post({ type: 'init', frontmatter, body, legacy });
-      lastText = document.getText();
+    // Text (in the document's own EOL) that the webview's state reflects. Any
+    // document change that does not leave the text equal to this came from
+    // somewhere else (plain editor, formatter, VS Code undo, git) and must be
+    // pushed to the webview; everything else (our own edits, the dirty-flag flip
+    // on save) must not, or the editor gets reset and loses its cursor.
+    let webviewText = '';
+    let syncVersion = 0;
+    // Edits are applied strictly in order; `change` handlers would otherwise
+    // interleave across the `applyEdit` await.
+    let queue: Promise<void> = Promise.resolve();
+    const enqueue = (job: () => Promise<void>) => {
+      queue = queue.then(job).catch((err) => console.error('[mdEditor]', err));
     };
+    let applying = false;
+    let pushPending = false;
+    let warnedRefused = false;
+
+    const eol = () => (document.eol === vscode.EndOfLine.CRLF ? '\r\n' : '\n');
+
+    const sendDocument = (type: 'init' | 'externalEdit', discardLocal = false) => {
+      pushPending = false;
+      webviewText = document.getText();
+      const { frontmatter, body } = split(toLF(webviewText));
+      if (type === 'init') {
+        void post({ type, frontmatter, body, legacy: detect(body), syncVersion });
+      } else {
+        void post({ type, frontmatter, body, syncVersion, discardLocal });
+      }
+    };
+
+    // The document changed under the webview. Bump the version right away so
+    // queued changes based on the old text are rejected, but send the text
+    // only once an edit in flight has settled, so its `applied` goes first.
+    const externalChange = () => {
+      syncVersion += 1;
+      if (applying) pushPending = true;
+      else sendDocument('externalEdit');
+    };
+
+    const applyChange = async (msg: { frontmatter: string; body: string; syncVersion: number; changeId: number }) => {
+      // Computed before the webview saw the latest external edit: applying it
+      // would silently revert that edit. The webview re-applies its edits on
+      // top of the newer text (no `applied` came for this one) and resends.
+      if (msg.syncVersion !== syncVersion) return;
+      const current = document.getText();
+      const merged = documentText(current, msg.frontmatter, msg.body, eol());
+      const edit = minimalEdit(current, merged);
+      if (!edit) {
+        void post({ type: 'applied', changeId: msg.changeId });
+        return;
+      }
+      webviewText = merged;
+      const workspaceEdit = new vscode.WorkspaceEdit();
+      workspaceEdit.replace(
+        document.uri,
+        new vscode.Range(document.positionAt(edit.start), document.positionAt(edit.end)),
+        edit.text,
+      );
+      applying = true;
+      let applied = false;
+      try {
+        applied = await vscode.workspace.applyEdit(workspaceEdit);
+      } catch (err) {
+        console.error('[mdEditor] applyEdit failed', err);
+      } finally {
+        applying = false;
+      }
+      if (applied) {
+        void post({ type: 'applied', changeId: msg.changeId });
+        if (pushPending) sendDocument('externalEdit');
+        return;
+      }
+      syncVersion += 1;
+      // Text unchanged: the edit was refused (read-only), not raced. Make the
+      // webview drop its edits, or it would resend them forever.
+      const refused = document.getText() === current;
+      if (refused && !warnedRefused) {
+        warnedRefused = true;
+        void vscode.window.showWarningMessage('mdEditor: このファイルは編集できないため、変更を保存できません。');
+      }
+      sendDocument('externalEdit', refused);
+    };
+
+    // Saves from anywhere (menu, Save All, auto save on focus change) must not
+    // miss keystrokes still waiting in the webview's debounce. Ask the webview
+    // to send them now (as a normal `change`) and hold the save until they
+    // are applied. Edits returned through waitUntil would be thrown away by
+    // VS Code if anything else touched the document meanwhile, so none are.
+    let flushSeq = 0;
+    const flushWaiters = new Map<number, () => void>();
+    const flushWebview = async (): Promise<void> => {
+      const requestId = ++flushSeq;
+      await new Promise<void>((resolve) => {
+        flushWaiters.set(requestId, resolve);
+        void post({ type: 'flush', requestId });
+        // A late reply's change still arrives as a normal `change`.
+        setTimeout(() => {
+          if (flushWaiters.delete(requestId)) resolve();
+        }, 1000);
+      });
+      await queue;
+    };
+
+    const willSaveSubscription = vscode.workspace.onWillSaveTextDocument((e) => {
+      if (e.document.uri.toString() === document.uri.toString()) e.waitUntil(flushWebview());
+    });
 
     const changeSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.toString() !== document.uri.toString()) return;
-      if (selfWriting) return;
-      const { frontmatter, body } = split(document.getText());
-      post({ type: 'externalEdit', frontmatter, body });
-      lastText = document.getText();
+      if (e.contentChanges.length === 0 || document.getText() === webviewText) return;
+      externalChange();
     });
 
     const msgSubscription = webviewPanel.webview.onDidReceiveMessage(async (raw: unknown) => {
@@ -51,36 +147,27 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
       if (!msg) return;
       switch (msg.type) {
         case 'ready':
-          pushInit();
+          syncVersion += 1;
+          sendDocument('init');
           break;
-        case 'change': {
-          const { hadFrontmatter } = split(document.getText());
-          const merged = merge(msg.frontmatter, msg.body, hadFrontmatter || msg.frontmatter.trim() !== '');
-          if (merged === document.getText()) return;
-          const edit = new vscode.WorkspaceEdit();
-          const fullRange = new vscode.Range(
-            document.positionAt(0),
-            document.positionAt(document.getText().length),
-          );
-          edit.replace(document.uri, fullRange, merged);
-          selfWriting = true;
-          try {
-            await vscode.workspace.applyEdit(edit);
-            lastText = document.getText();
-          } finally {
-            selfWriting = false;
-          }
+        case 'change':
+          enqueue(() => applyChange(msg));
+          break;
+        case 'flushed': {
+          // Sent right after the flushed `change` (if any), which is queued by now.
+          const resolve = flushWaiters.get(msg.requestId);
+          flushWaiters.delete(msg.requestId);
+          resolve?.();
           break;
         }
         case 'saveImage': {
           try {
-            const bytes = new Uint8Array(msg.bytes);
-            const { relPath } = await imageStore.save(bytes, msg.mime);
+            const { relPath } = await imageStore.save(msg.bytes, msg.mime);
             const displayUri = imageStore.resolveDisplayUri(webviewPanel.webview, relPath) ?? '';
-            post({ type: 'imageSaved', requestId: msg.requestId, relPath, displayUri });
+            void post({ type: 'imageSaved', requestId: msg.requestId, relPath, displayUri });
           } catch (err) {
             const error = err instanceof Error ? err.message : String(err);
-            post({ type: 'imageError', requestId: msg.requestId, error });
+            void post({ type: 'imageError', requestId: msg.requestId, error });
           }
           break;
         }
@@ -90,21 +177,20 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
             const displayUri = imageStore.resolveDisplayUri(webviewPanel.webview, relPath);
             if (displayUri) entries.push({ relPath, displayUri });
           }
-          post({ type: 'imageUris', entries });
+          void post({ type: 'imageUris', entries });
           break;
         }
-        case 'openLink': {
-          try {
-            const parsed = vscode.Uri.parse(msg.url, true);
-            if (parsed.scheme !== 'http' && parsed.scheme !== 'https') return;
-            await vscode.env.openExternal(parsed);
-          } catch { /* invalid url */ }
+        case 'openLink':
+          await openLink(msg.url, docDir);
           break;
-        }
         case 'openPlainEditor': {
           await vscode.commands.executeCommand('vscode.openWith', document.uri, 'default');
           break;
         }
+        case 'notify':
+          if (msg.level === 'error') void vscode.window.showErrorMessage(`mdEditor: ${msg.message}`);
+          else void vscode.window.showWarningMessage(`mdEditor: ${msg.message}`);
+          break;
         case 'log':
           console[msg.level === 'error' ? 'error' : msg.level === 'warn' ? 'warn' : 'log'](
             '[mdEditor webview]',
@@ -112,11 +198,10 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
           );
           break;
       }
-      // suppress unused warning for lastText baseline
-      void lastText;
     });
 
     webviewPanel.onDidDispose(() => {
+      willSaveSubscription.dispose();
       changeSubscription.dispose();
       msgSubscription.dispose();
     });
@@ -157,6 +242,36 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
   }
 }
 
+// http(s)/mailto open in the browser; relative links (`../other.md`,
+// `img/x.png#frag`) open the workspace file next to the document.
+async function openLink(url: string, docDir: vscode.Uri): Promise<void> {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(url)) {
+    try {
+      const parsed = vscode.Uri.parse(url, true);
+      if (parsed.scheme === 'http' || parsed.scheme === 'https' || parsed.scheme === 'mailto') {
+        await vscode.env.openExternal(parsed);
+      }
+    } catch { /* invalid url */ }
+    return;
+  }
+  let relPath: string;
+  try {
+    relPath = decodeURIComponent(url.replace(/[?#].*$/, ''));
+  } catch {
+    return;
+  }
+  if (!relPath || relPath.startsWith('/')) return;
+  const target = vscode.Uri.joinPath(docDir, relPath);
+  try {
+    await vscode.workspace.fs.stat(target);
+  } catch {
+    void vscode.window.showWarningMessage(`mdEditor: ${relPath} が見つかりません`);
+    return;
+  }
+  await vscode.commands.executeCommand('vscode.open', target);
+}
+
+
 function validateWebviewMessage(raw: unknown): WebviewToHost | null {
   if (!raw || typeof raw !== 'object') return null;
   const m = raw as Record<string, unknown>;
@@ -164,24 +279,34 @@ function validateWebviewMessage(raw: unknown): WebviewToHost | null {
     case 'ready':
       return { type: 'ready' };
     case 'change':
-      if (typeof m.frontmatter === 'string' && typeof m.body === 'string') {
-        return { type: 'change', frontmatter: m.frontmatter, body: m.body };
+      if (
+        typeof m.frontmatter === 'string' &&
+        typeof m.body === 'string' &&
+        typeof m.syncVersion === 'number' &&
+        typeof m.changeId === 'number'
+      ) {
+        return { type: 'change', frontmatter: m.frontmatter, body: m.body, syncVersion: m.syncVersion, changeId: m.changeId };
       }
       return null;
-    case 'saveImage':
+    case 'flushed':
+      return typeof m.requestId === 'number' ? { type: 'flushed', requestId: m.requestId } : null;
+    case 'saveImage': {
+      // Typed arrays cross the webview boundary as typed arrays.
+      const bytes = m.bytes instanceof Uint8Array ? m.bytes : null;
       if (
         typeof m.requestId === 'string' &&
         m.requestId.length > 0 &&
         m.requestId.length < 128 &&
-        Array.isArray(m.bytes) &&
-        m.bytes.length > 0 &&
-        m.bytes.length < 20 * 1024 * 1024 &&
+        bytes &&
+        bytes.byteLength > 0 &&
+        bytes.byteLength <= MAX_IMAGE_BYTES &&
         typeof m.mime === 'string' &&
         m.mime.length < 128
       ) {
-        return { type: 'saveImage', requestId: m.requestId, bytes: m.bytes as number[], mime: m.mime };
+        return { type: 'saveImage', requestId: m.requestId, bytes, mime: m.mime };
       }
       return null;
+    }
     case 'resolveImages':
       if (Array.isArray(m.relPaths) && m.relPaths.every((p) => typeof p === 'string' && p.length < 256)) {
         return { type: 'resolveImages', relPaths: m.relPaths as string[] };
@@ -194,6 +319,11 @@ function validateWebviewMessage(raw: unknown): WebviewToHost | null {
       return null;
     case 'openPlainEditor':
       return { type: 'openPlainEditor' };
+    case 'notify':
+      if ((m.level === 'warn' || m.level === 'error') && typeof m.message === 'string' && m.message.length < 4096) {
+        return { type: 'notify', level: m.level, message: m.message };
+      }
+      return null;
     case 'log':
       if (
         (m.level === 'info' || m.level === 'warn' || m.level === 'error') &&
