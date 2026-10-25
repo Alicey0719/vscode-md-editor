@@ -21,14 +21,15 @@ import { saveImage, resolveImageUri, post } from './hostBridge';
 import { createToolbar, type Toolbar } from './toolbar';
 import { patchImageBlockSerialization } from './imageBlockPatch';
 import { BodySync, blockRuns, childrenOf, contentBlocks, isEmptyParagraph, type BlockRun } from './bodySync';
-import { imageUploadPlugin, pickImageFiles } from './imageInsert';
+import { attachCodeBlockImageHandling, imageUploadPlugin, pickImageFiles } from './imageInsert';
 import { linkRangeAt } from './links';
 
 export interface BodyEditor {
   // Show markdown from the host. `confirmed` is the body the host held before
-  // this change as far as we know (our last applied change). Returns true
-  // when local edits the host does not have survived and must be (re)sent.
-  setMarkdown: (markdown: string, confirmed?: string) => boolean;
+  // this change as far as we know (our last applied change); `discard` drops
+  // local edits instead of keeping them. Returns true when local edits the
+  // host does not have survived and must be (re)sent.
+  setMarkdown: (markdown: string, confirmed?: string, discard?: boolean) => boolean;
   // Markdown to send to the host; `changed` is false when it already has it.
   takeMarkdown: () => { markdown: string; changed: boolean };
   onChange: (cb: () => void) => void;
@@ -164,13 +165,13 @@ export async function createBodyEditor(host: HTMLElement): Promise<BodyEditor> {
     }
   };
 
-  const setMarkdown = (markdown: string, confirmed: string = sync.text): boolean => {
+  const setMarkdown = (markdown: string, confirmed: string = sync.text, discard = false): boolean => {
     const doc = view().state.doc;
     const base = sync.blocksOf(confirmed);
     const incoming = sync.setBase(markdown, parse(markdown));
     const local = contentBlocks(doc);
     const mine = blockRuns(base, local);
-    if (mine.length === 0) {
+    if (discard || mine.length === 0) {
       showDoc(incoming);
       return false;
     }
@@ -181,7 +182,7 @@ export async function createBodyEditor(host: HTMLElement): Promise<BodyEditor> {
     if (theirs.length === 0) return true;
     const merged = mergeRuns(base, local, external, mine, theirs);
     if (merged) {
-      showDoc(doc.type.create(null, Fragment.fromArray(merged)));
+      showDoc(doc.type.createAndFill(null, Fragment.fromArray(merged)) ?? incoming);
       return true;
     }
     showDoc(incoming);
@@ -205,6 +206,7 @@ export async function createBodyEditor(host: HTMLElement): Promise<BodyEditor> {
     });
 
   attachLinkClickHandler(host);
+  attachCodeBlockImageHandling(host, view);
 
   toolbar = createToolbar(crepe, {
     editLink,
@@ -256,7 +258,7 @@ function mergeRuns(
     i = run.prevTo;
   }
   out.push(...base.slice(i));
-  return out.length > 0 ? out : null;
+  return out;
 }
 
 function attachLinkClickHandler(root: HTMLElement): void {

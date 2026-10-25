@@ -39,10 +39,6 @@ export function minimalEdit(before: string, after: string): TextEdit | null {
   return { start, end: endB, text: after.slice(start, endA) };
 }
 
-export function applyEdit(text: string, edit: TextEdit): string {
-  return text.slice(0, edit.start) + edit.text + text.slice(edit.end);
-}
-
 const isFirstHalf = (c: number) => c === 0x0d || (c >= 0xd800 && c <= 0xdbff);
 const isSecondHalf = (c: number) => c === 0x0a || (c >= 0xdc00 && c <= 0xdfff);
 

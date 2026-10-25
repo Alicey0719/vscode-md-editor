@@ -54,9 +54,14 @@ onMessage((msg) => {
   }
 });
 
+// Same limit as src/imageStore.ts. The host drops larger messages unanswered,
+// so reject here instead of waiting for the timeout.
+export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
 // Typed arrays cross the webview boundary as binary; spreading them into a
 // number[] made every pasted image ~4x larger and slow to serialize.
 export function saveImage(bytes: Uint8Array, mime: string): Promise<{ relPath: string; displayUri: string }> {
+  if (bytes.byteLength > MAX_IMAGE_BYTES) return Promise.reject(new Error('画像が大きすぎます (20MB まで)'));
   const requestId = nextRequestId();
   return new Promise((resolve, reject) => {
     pending.set(requestId, { resolve, reject });

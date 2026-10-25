@@ -22,8 +22,7 @@ async function bootstrap(): Promise<void> {
   let hostBody = '';
   let hostFrontmatter = '';
   let syncVersion = 0;
-  // Changes sent since the last host message; the next externalEdit says
-  // which of them were applied.
+  // Changes sent but not yet acknowledged with `applied`.
   let sent: Array<{ id: number; body: string; frontmatter: string }> = [];
   let nextChangeId = 0;
   let changeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -58,24 +57,30 @@ async function bootstrap(): Promise<void> {
       sent = [];
       nextChangeId = 0;
       void mount(msg.legacy);
+    } else if (msg.type === 'applied') {
+      const i = sent.findIndex((c) => c.id === msg.changeId);
+      if (i < 0) return;
+      hostBody = sent[i].body;
+      hostFrontmatter = sent[i].frontmatter;
+      sent = sent.slice(i + 1);
     } else if (msg.type === 'externalEdit') {
-      // What the host held before this edit: our last applied change, or
-      // what it sent last time. Anything we sent after that was dropped.
-      const applied = sent.find((c) => c.id === msg.appliedChangeId);
-      const confirmedBody = applied?.body ?? hostBody;
-      const confirmedFrontmatter = applied?.frontmatter ?? hostFrontmatter;
+      // Every change still unacknowledged was dropped; the host held
+      // hostBody / hostFrontmatter before this edit.
+      const confirmedBody = hostBody;
+      const confirmedFrontmatter = hostFrontmatter;
       sent = [];
       syncVersion = msg.syncVersion;
       hostBody = msg.body;
       hostFrontmatter = msg.frontmatter;
       // Frontmatter: an edit elsewhere wins; otherwise keep (and resend) ours.
-      if (msg.frontmatter !== confirmedFrontmatter && msg.frontmatter !== frontmatterValue) {
+      const external = msg.frontmatter !== confirmedFrontmatter || msg.discardLocal;
+      if (external && msg.frontmatter !== frontmatterValue) {
         frontmatterValue = msg.frontmatter;
         frontmatterPane?.setValue(msg.frontmatter);
       }
       frontmatterDirty = frontmatterValue !== msg.frontmatter;
       if (!bodyEditor) return;
-      if (bodyEditor.setMarkdown(msg.body, confirmedBody) || frontmatterDirty) scheduleChange();
+      if (bodyEditor.setMarkdown(msg.body, confirmedBody, msg.discardLocal) || frontmatterDirty) scheduleChange();
       else if (changeTimer !== null) {
         clearTimeout(changeTimer);
         changeTimer = null;

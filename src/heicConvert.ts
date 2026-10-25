@@ -46,14 +46,21 @@ function run(cmd: string, args: string[]): Promise<void> {
   });
 }
 
-// libheif writes `out-1.jpg`, `out-2.jpg`, ... for multi-image files.
+// libheif writes `out-1.jpg`, `out-2.jpg`, ... for multi-image files, plus
+// depth / auxiliary images (`out-1-depth.jpg`). The photo is the largest.
 async function findOutput(dir: string, expected: string): Promise<string | null> {
   try {
     await fs.access(expected);
     return expected;
   } catch { /* fall through */ }
-  const jpgs = (await fs.readdir(dir)).filter((f) => f.endsWith('.jpg')).sort();
-  return jpgs.length > 0 ? path.join(dir, jpgs[0]) : null;
+  let best: { file: string; size: number } | null = null;
+  for (const name of await fs.readdir(dir)) {
+    if (!name.endsWith('.jpg')) continue;
+    const file = path.join(dir, name);
+    const { size } = await fs.stat(file);
+    if (!best || size > best.size) best = { file, size };
+  }
+  return best?.file ?? null;
 }
 
 export async function heicToJpeg(input: Uint8Array): Promise<Uint8Array> {

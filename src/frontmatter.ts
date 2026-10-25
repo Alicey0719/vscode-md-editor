@@ -1,5 +1,7 @@
 // Pure functions to split/merge YAML frontmatter from a Markdown document.
 
+import { toLF, fromLF } from './textEdit';
+
 export interface Split {
   frontmatter: string;
   body: string;
@@ -29,4 +31,18 @@ export function merge(frontmatter: string, body: string, hadFrontmatter: boolean
   }
   const fm = frontmatter.replace(/\r?\n$/, '');
   return `---\n${fm}\n---\n\n${bodyOut.replace(/^\r?\n+/, '')}`;
+}
+
+// The document text for the webview's frontmatter and body. When the
+// frontmatter is unchanged, everything before the body (fences, the blank
+// line after them) is kept byte for byte, so body edits never touch it.
+export function documentText(current: string, frontmatter: string, body: string, eol: '\n' | '\r\n'): string {
+  const cur = split(current);
+  const bodyOut = body.endsWith('\n') ? body : `${body}\n`;
+  if (toLF(cur.frontmatter) === frontmatter && (cur.hadFrontmatter || frontmatter.trim() === '')) {
+    // A fully re-serialized body has no leading blank line; keep the old one.
+    const lead = bodyOut.startsWith('\n') ? '' : (/^\n*/.exec(toLF(cur.body)) ?? [''])[0];
+    return current.slice(0, current.length - cur.body.length) + fromLF(lead + bodyOut, eol);
+  }
+  return fromLF(merge(frontmatter, body, cur.hadFrontmatter || frontmatter.trim() !== ''), eol);
 }

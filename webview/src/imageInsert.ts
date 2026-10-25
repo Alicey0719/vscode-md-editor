@@ -11,7 +11,7 @@
 import { NodeSelection, Plugin, PluginKey, TextSelection, type Transaction } from '@milkdown/prose/state';
 import { Decoration, DecorationSet, type EditorView } from '@milkdown/prose/view';
 import type { Node as ProseNode, NodeType } from '@milkdown/prose/model';
-import { saveImage, post } from './hostBridge';
+import { saveImage, post, MAX_IMAGE_BYTES } from './hostBridge';
 import { isEmptyParagraph } from './bodySync';
 
 const IMAGE_MIME = /^image\/(png|jpe?g|webp|gif|avif|hei[cf])$/i;
@@ -88,6 +88,28 @@ function imageFiles(data: DataTransfer | null): File[] {
   return files.filter(isImageFile);
 }
 
+// Crepe's code blocks are CodeMirror node views that swallow paste and drop
+// before ProseMirror sees them; catch image files there and put the images
+// after the code block.
+export function attachCodeBlockImageHandling(root: HTMLElement, getView: () => EditorView): void {
+  const handle = (e: Event, data: DataTransfer | null) => {
+    const codeBlock = e.target instanceof Element ? e.target.closest('.cm-editor') : null;
+    if (!codeBlock) return;
+    const files = imageFiles(data);
+    if (files.length === 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const view = getView();
+    let pos: number | undefined;
+    try {
+      pos = view.posAtDOM(codeBlock, 0);
+    } catch { /* fall back to the selection */ }
+    insertImageFiles(view, files, pos);
+  };
+  root.addEventListener('paste', (e) => handle(e, e.clipboardData), true);
+  root.addEventListener('drop', (e) => handle(e, e.dataTransfer), true);
+}
+
 export function pickImageFiles(view: EditorView): void {
   const input = document.createElement('input');
   input.type = 'file';
@@ -137,6 +159,7 @@ async function saveAll(files: File[], onProgress: (done: number) => void): Promi
       const i = next++;
       const file = files[i];
       try {
+        if (file.size > MAX_IMAGE_BYTES) throw new Error('画像が大きすぎます (20MB まで)');
         const bytes = new Uint8Array(await file.arrayBuffer());
         results[i] = { relPath: (await saveImage(bytes, file.type)).relPath };
       } catch (err) {

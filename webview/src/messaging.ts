@@ -5,7 +5,8 @@ export type HostToWebview =
   | { type: 'init'; frontmatter: string; body: string; legacy: LegacyReport; syncVersion: number }
   | { type: 'imageSaved'; requestId: string; relPath: string; displayUri: string }
   | { type: 'imageError'; requestId: string; error: string }
-  | { type: 'externalEdit'; frontmatter: string; body: string; syncVersion: number; appliedChangeId: number }
+  | { type: 'applied'; changeId: number }
+  | { type: 'externalEdit'; frontmatter: string; body: string; syncVersion: number; discardLocal?: boolean }
   | { type: 'imageUris'; entries: Array<{ relPath: string; displayUri: string }> };
 
 export type WebviewToHost =

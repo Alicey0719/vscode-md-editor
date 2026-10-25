@@ -94,11 +94,7 @@ export class BodySync {
       if (run.prevFrom < run.prevTo) {
         const from = ranges[run.prevFrom][0];
         const to = ranges[run.prevTo - 1][1];
-        if (inserted) text = text.slice(0, from) + inserted + text.slice(to);
-        // Pure deletion: take the separating blank line with it.
-        else if (run.prevTo < n) text = text.slice(0, from) + text.slice(ranges[run.prevTo][0]);
-        else if (run.prevFrom > 0) text = text.slice(0, ranges[run.prevFrom - 1][1]) + text.slice(to);
-        else text = text.slice(0, from) + text.slice(to);
+        text = inserted ? text.slice(0, from) + inserted + text.slice(to) : deleteBlocks(text, from, to);
       } else if (run.prevFrom > 0) {
         const at = ranges[run.prevFrom - 1][1];
         text = `${text.slice(0, at)}\n\n${inserted}${text.slice(at)}`;
@@ -111,6 +107,19 @@ export class BodySync {
     }
     return text;
   }
+}
+
+// Remove the source of deleted blocks plus the blank lines that separated
+// them, leaving anything else between blocks (link definitions, `<br>` lines,
+// the next block's indentation) alone.
+function deleteBlocks(text: string, from: number, to: number): string {
+  let end = to;
+  for (let m; (m = /^[ \t]*\r?\n/.exec(text.slice(end))); ) end += m[0].length;
+  if (end < text.length) return text.slice(0, from) + text.slice(end);
+  // Nothing follows: drop the separator before them instead.
+  let start = from;
+  while (start > 0 && /\s/.test(text[start - 1])) start--;
+  return text.slice(0, start) + text.slice(to);
 }
 
 export interface BlockRun {

@@ -95,12 +95,13 @@ export function createToolbar(crepe: Crepe, actions: ToolbarActions): Toolbar {
   bar.appendChild(divider());
 
   const blocks = group();
-  const inBullet = inNode('bullet_list');
-  const inOrdered = inNode('ordered_list');
+  // The innermost list decides both the highlight and what a click does.
+  const inBullet = (st: EditorState) => innermostList(st) === 'bullet_list';
+  const inOrdered = (st: EditorState) => innermostList(st) === 'ordered_list';
   const inQuote = inNode('blockquote');
   const inCode = (s: EditorState) => s.selection.$from.parent.type.name === 'code_block';
-  toggle(blocks, icon.ul, 'Bullet list', inBullet, () => call(innermostList(crepe) === 'bullet_list' ? liftListItemCommand : wrapInBulletListCommand));
-  toggle(blocks, icon.ol, 'Numbered list', inOrdered, () => call(innermostList(crepe) === 'ordered_list' ? liftListItemCommand : wrapInOrderedListCommand));
+  toggle(blocks, icon.ul, 'Bullet list', inBullet, () => call(isActiveNow(crepe, inBullet) ? liftListItemCommand : wrapInBulletListCommand));
+  toggle(blocks, icon.ol, 'Numbered list', inOrdered, () => call(isActiveNow(crepe, inOrdered) ? liftListItemCommand : wrapInOrderedListCommand));
   toggle(blocks, icon.quote, 'Blockquote', inQuote, () => (isActiveNow(crepe, inQuote) ? runOnView(unwrapQuote) : call(wrapInBlockquoteCommand)));
   toggle(blocks, icon.codeBlock, 'Code block', inCode, () => call(isActiveNow(crepe, inCode) ? turnIntoTextCommand : createCodeBlockCommand));
   bar.appendChild(blocks);
@@ -168,15 +169,13 @@ function unwrapQuote(state: EditorState, dispatch: (tr: Transaction) => void): b
   return true;
 }
 
-function innermostList(crepe: Crepe): string | null {
-  return crepe.editor.action((ctx) => {
-    const { $from } = ctx.get(editorViewCtx).state.selection;
-    for (let d = $from.depth; d > 0; d--) {
-      const name = $from.node(d).type.name;
-      if (name === 'bullet_list' || name === 'ordered_list') return name;
-    }
-    return null;
-  });
+function innermostList(state: EditorState): string | null {
+  const { $from } = state.selection;
+  for (let d = $from.depth; d > 0; d--) {
+    const name = $from.node(d).type.name;
+    if (name === 'bullet_list' || name === 'ordered_list') return name;
+  }
+  return null;
 }
 
 function isActiveNow(crepe: Crepe, test: (s: EditorState) => boolean): boolean {
@@ -232,9 +231,11 @@ function styleDropdown(call: Callable, runOnView: RunOnView): { root: HTMLElemen
   select.addEventListener('mousedown', (e) => e.stopPropagation());
   select.addEventListener('change', () => {
     const v = select.value;
+    // Read before dispatching: the command refreshes the toolbar.
+    const wasQuoted = quoted;
     if (v === 'p') {
       call(turnIntoTextCommand);
-      if (quoted) runOnView(unwrapQuote);
+      if (wasQuoted) runOnView(unwrapQuote);
     } else if (/^h[1-6]$/.test(v)) {
       call(wrapInHeadingCommand, Number(v.slice(1)));
     } else if (v === 'quote') {
