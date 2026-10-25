@@ -181,22 +181,32 @@ export function blockRuns(prev: ProseNode[], next: ProseNode[]): BlockRun[] {
 }
 
 // Attributes Milkdown derives from other data and keeps in sync on its own
-// (heading ids from the text, list labels from the position) or that we never
-// save (image scale). They must not make two blocks count as different.
+// (heading ids from the text, list labels from the position), that differ
+// between items made in the editor and the same items parsed back (spread),
+// or that only record source style or never get saved (emphasis marker,
+// image scale). They must not make two blocks count as different.
 const DERIVED_ATTRS: Record<string, readonly string[]> = {
   heading: ['id'],
-  list_item: ['label', 'listType'],
+  list_item: ['label', 'listType', 'spread'],
   'image-block': ['ratio'],
+  emphasis: ['marker'],
+  strong: ['marker'],
 };
+
+function sameAttrs(type: string, a: Record<string, unknown>, b: Record<string, unknown>): boolean {
+  const derived = DERIVED_ATTRS[type] ?? [];
+  return Object.keys(a).every((key) => derived.includes(key) || JSON.stringify(a[key]) === JSON.stringify(b[key]));
+}
+
+function sameMarks(a: readonly Mark[], b: readonly Mark[]): boolean {
+  return a.length === b.length && a.every((m, i) => m.type === b[i].type && sameAttrs(m.type.name, m.attrs, b[i].attrs));
+}
 
 export function sameBlock(a: ProseNode, b: ProseNode): boolean {
   if (a === b) return true;
-  if (a.type !== b.type || !Mark.sameSet(a.marks, b.marks)) return false;
+  if (a.type !== b.type || !sameMarks(a.marks, b.marks)) return false;
   if (a.isText) return a.text === b.text;
-  const derived = DERIVED_ATTRS[a.type.name] ?? [];
-  for (const key of Object.keys(a.attrs)) {
-    if (!derived.includes(key) && JSON.stringify(a.attrs[key]) !== JSON.stringify(b.attrs[key])) return false;
-  }
+  if (!sameAttrs(a.type.name, a.attrs, b.attrs)) return false;
   // Blank lines inside lists and quotes are editor-only too.
   const ac = a.isTextblock ? childrenOf(a) : contentBlocks(a);
   const bc = b.isTextblock ? childrenOf(b) : contentBlocks(b);

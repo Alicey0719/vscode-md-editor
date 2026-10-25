@@ -6,6 +6,8 @@ import { ImageStore, MAX_IMAGE_BYTES } from './imageStore';
 import { minimalEdit, toLF } from './textEdit';
 import type { HostToWebview, WebviewToHost } from './messaging';
 
+type FlushedChange = { frontmatter: string; body: string; syncVersion: number; changeId: number };
+
 export class MdEditorProvider implements vscode.CustomTextEditorProvider {
   public static readonly viewType = 'mdEditor.wysiwyg';
 
@@ -91,6 +93,8 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
       let applied = false;
       try {
         applied = await vscode.workspace.applyEdit(workspaceEdit);
+      } catch (err) {
+        console.error('[mdEditor] applyEdit failed', err);
       } finally {
         applying = false;
       }
@@ -110,6 +114,40 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
       sendDocument('externalEdit', refused);
     };
 
+    // Saves from anywhere (menu, Save All, auto save on focus change) must not
+    // miss keystrokes still waiting in the webview's debounce: ask for them
+    // and hand them to VS Code as pre-save edits.
+    let flushSeq = 0;
+    const flushWaiters = new Map<number, (change: FlushedChange | undefined) => void>();
+    const flushWebview = async (): Promise<vscode.TextEdit[]> => {
+      const requestId = ++flushSeq;
+      const change = await new Promise<FlushedChange | undefined>((resolve) => {
+        flushWaiters.set(requestId, resolve);
+        void post({ type: 'flush', requestId });
+        setTimeout(() => {
+          if (flushWaiters.delete(requestId)) resolve(undefined);
+        }, 1000);
+      });
+      await queue; // changes sent before the flush land first
+      if (!change || change.syncVersion !== syncVersion) return [];
+      const current = document.getText();
+      const merged = documentText(current, change.frontmatter, change.body, eol());
+      const edit = minimalEdit(current, merged);
+      void post({ type: 'applied', changeId: change.changeId });
+      if (!edit) return [];
+      webviewText = merged;
+      return [
+        vscode.TextEdit.replace(
+          new vscode.Range(document.positionAt(edit.start), document.positionAt(edit.end)),
+          edit.text,
+        ),
+      ];
+    };
+
+    const willSaveSubscription = vscode.workspace.onWillSaveTextDocument((e) => {
+      if (e.document.uri.toString() === document.uri.toString()) e.waitUntil(flushWebview());
+    });
+
     const changeSubscription = vscode.workspace.onDidChangeTextDocument((e) => {
       if (e.document.uri.toString() !== document.uri.toString()) return;
       if (e.contentChanges.length === 0 || document.getText() === webviewText) return;
@@ -127,12 +165,12 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
         case 'change':
           enqueue(() => applyChange(msg));
           break;
-        case 'save':
-          // Queued behind pending changes so the last keystrokes are saved too.
-          enqueue(async () => {
-            await document.save();
-          });
+        case 'flushed': {
+          const resolve = flushWaiters.get(msg.requestId);
+          flushWaiters.delete(msg.requestId);
+          resolve?.(msg.change);
           break;
+        }
         case 'saveImage': {
           try {
             const { relPath } = await imageStore.save(msg.bytes, msg.mime);
@@ -174,6 +212,7 @@ export class MdEditorProvider implements vscode.CustomTextEditorProvider {
     });
 
     webviewPanel.onDidDispose(() => {
+      willSaveSubscription.dispose();
       changeSubscription.dispose();
       msgSubscription.dispose();
     });
@@ -243,16 +282,6 @@ async function openLink(url: string, docDir: vscode.Uri): Promise<void> {
   await vscode.commands.executeCommand('vscode.open', target);
 }
 
-function toBytes(value: unknown): Uint8Array | null {
-  // VS Code transfers typed arrays as-is; older builds may hand over a plain
-  // ArrayBuffer or a JSON number array.
-  if (value instanceof Uint8Array) return value;
-  if (value instanceof ArrayBuffer) return new Uint8Array(value);
-  if (Array.isArray(value) && value.length <= MAX_IMAGE_BYTES && value.every((b) => typeof b === 'number')) {
-    return Uint8Array.from(value as number[]);
-  }
-  return null;
-}
 
 function validateWebviewMessage(raw: unknown): WebviewToHost | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -270,10 +299,25 @@ function validateWebviewMessage(raw: unknown): WebviewToHost | null {
         return { type: 'change', frontmatter: m.frontmatter, body: m.body, syncVersion: m.syncVersion, changeId: m.changeId };
       }
       return null;
-    case 'save':
-      return { type: 'save' };
+    case 'flushed': {
+      if (typeof m.requestId !== 'number') return null;
+      const c = m.change as Record<string, unknown> | undefined;
+      if (c === undefined) return { type: 'flushed', requestId: m.requestId };
+      if (
+        c &&
+        typeof c.frontmatter === 'string' &&
+        typeof c.body === 'string' &&
+        typeof c.syncVersion === 'number' &&
+        typeof c.changeId === 'number'
+      ) {
+        const change = { frontmatter: c.frontmatter, body: c.body, syncVersion: c.syncVersion, changeId: c.changeId };
+        return { type: 'flushed', requestId: m.requestId, change };
+      }
+      return null;
+    }
     case 'saveImage': {
-      const bytes = toBytes(m.bytes);
+      // Typed arrays cross the webview boundary as typed arrays.
+      const bytes = m.bytes instanceof Uint8Array ? m.bytes : null;
       if (
         typeof m.requestId === 'string' &&
         m.requestId.length > 0 &&

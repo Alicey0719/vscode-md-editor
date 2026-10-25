@@ -180,18 +180,16 @@ export async function createBodyEditor(host: HTMLElement): Promise<BodyEditor> {
     // Formatting-only change on the host side (format on save, ...): keep
     // the editor as is; the local edits are resent against the new text.
     if (theirs.length === 0) return true;
-    const merged = mergeRuns(base, local, external, mine, theirs);
-    if (merged) {
-      showDoc(doc.type.createAndFill(null, Fragment.fromArray(merged)) ?? incoming);
-      return true;
+    const { blocks, kept, dropped } = mergeRuns(base, local, external, mine, theirs);
+    showDoc(doc.type.createAndFill(null, Fragment.fromArray(blocks)) ?? incoming);
+    if (dropped) {
+      post({
+        type: 'notify',
+        level: 'warn',
+        message: '別のエディタで同じ箇所が変更されたため、その箇所のこちらの未反映の編集を取り消しました。',
+      });
     }
-    showDoc(incoming);
-    post({
-      type: 'notify',
-      level: 'warn',
-      message: '別のエディタで同じ箇所が変更されたため、こちらの未反映の編集を取り消しました。',
-    });
-    return false;
+    return kept;
   };
 
   const editLink = () =>
@@ -234,31 +232,32 @@ export async function createBodyEditor(host: HTMLElement): Promise<BodyEditor> {
 
 const contentIndices = (nodes: ProseNode[]) => nodes.flatMap((node, i) => (isEmptyParagraph(node) ? [] : [i]));
 
-// Apply both sides' block changes to `base` when they touch different blocks;
-// null when they collide.
+// Apply both sides' block changes to `base`. Where a local run collides with
+// an external one the document wins and that local run is dropped; local
+// runs elsewhere are kept.
 function mergeRuns(
   base: ProseNode[],
   mine: ProseNode[],
   theirs: ProseNode[],
   a: BlockRun[],
   b: BlockRun[],
-): ProseNode[] | null {
+): { blocks: ProseNode[]; kept: boolean; dropped: boolean } {
   const collide = (x: BlockRun, y: BlockRun) =>
     (x.prevFrom < y.prevTo && y.prevFrom < x.prevTo) ||
     (x.prevFrom === x.prevTo && y.prevFrom <= x.prevFrom && x.prevFrom <= y.prevTo) ||
     (y.prevFrom === y.prevTo && x.prevFrom <= y.prevFrom && y.prevFrom <= x.prevTo);
-  if (a.some((x) => b.some((y) => collide(x, y)))) return null;
-  const runs = [...a.map((run) => ({ run, src: mine })), ...b.map((run) => ({ run, src: theirs }))].sort(
+  const keep = a.filter((x) => !b.some((y) => collide(x, y)));
+  const runs = [...keep.map((run) => ({ run, src: mine })), ...b.map((run) => ({ run, src: theirs }))].sort(
     (x, y) => x.run.prevFrom - y.run.prevFrom || x.run.prevTo - y.run.prevTo,
   );
-  const out: ProseNode[] = [];
+  const blocks: ProseNode[] = [];
   let i = 0;
   for (const { run, src } of runs) {
-    out.push(...base.slice(i, run.prevFrom), ...src.slice(run.nextFrom, run.nextTo));
+    blocks.push(...base.slice(i, run.prevFrom), ...src.slice(run.nextFrom, run.nextTo));
     i = run.prevTo;
   }
-  out.push(...base.slice(i));
-  return out;
+  blocks.push(...base.slice(i));
+  return { blocks, kept: keep.length > 0, dropped: keep.length < a.length };
 }
 
 function attachLinkClickHandler(root: HTMLElement): void {

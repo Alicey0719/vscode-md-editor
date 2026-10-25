@@ -72,6 +72,10 @@ export async function heicToJpeg(input: Uint8Array): Promise<Uint8Array> {
     const failures: string[] = [];
     for (const c of converters()) {
       try {
+        // A converter that failed half-way may have left a truncated JPEG.
+        for (const name of await fs.readdir(dir)) {
+          if (name.endsWith('.jpg')) await fs.rm(path.join(dir, name), { force: true });
+        }
         await run(c.cmd, c.args(src, dst));
         const out = await findOutput(dir, dst);
         if (!out) throw new Error('no output produced');

@@ -77,11 +77,14 @@ export function saveImage(bytes: Uint8Array, mime: string): Promise<{ relPath: s
 }
 
 const uriWaiters = new Map<string, Array<(uri: string | null) => void>>();
+// Paths asked for and not answered yet, so each is requested once.
+const requested = new Set<string>();
 
 onMessage((msg) => {
   if (msg.type === 'imageUris') {
     for (const { relPath, displayUri } of msg.entries) {
       uriCache.set(relPath, displayUri);
+      requested.delete(relPath);
       const waiters = uriWaiters.get(relPath);
       if (waiters) {
         uriWaiters.delete(relPath);
@@ -91,6 +94,17 @@ onMessage((msg) => {
   }
 });
 
+// Webview URIs for img/... paths: one cache for the image-block proxy and
+// the DOM rewriter.
+export const cachedImageUri = (relPath: string): string | undefined => uriCache.get(relPath);
+
+export function requestImageUris(relPaths: string[]): void {
+  const need = relPaths.filter((p) => !uriCache.has(p) && !requested.has(p));
+  if (need.length === 0) return;
+  need.forEach((p) => requested.add(p));
+  post({ type: 'resolveImages', relPaths: need });
+}
+
 export function resolveImageUri(relPath: string): Promise<string | null> {
   const cached = uriCache.get(relPath);
   if (cached) return Promise.resolve(cached);
@@ -98,19 +112,16 @@ export function resolveImageUri(relPath: string): Promise<string | null> {
     const waiters = uriWaiters.get(relPath) ?? [];
     waiters.push(resolve);
     uriWaiters.set(relPath, waiters);
-    post({ type: 'resolveImages', relPaths: [relPath] });
+    requestImageUris([relPath]);
     setTimeout(() => {
       const list = uriWaiters.get(relPath);
       if (list && list.includes(resolve)) {
         const filtered = list.filter((r) => r !== resolve);
         if (filtered.length === 0) uriWaiters.delete(relPath);
         else uriWaiters.set(relPath, filtered);
+        requested.delete(relPath);
         resolve(null);
       }
     }, 5000);
   });
-}
-
-export function primeImageUris(entries: Array<{ relPath: string; displayUri: string }>): void {
-  for (const { relPath, displayUri } of entries) uriCache.set(relPath, displayUri);
 }

@@ -6,13 +6,14 @@ export type HostToWebview =
   | { type: 'imageSaved'; requestId: string; relPath: string; displayUri: string }
   | { type: 'imageError'; requestId: string; error: string }
   | { type: 'applied'; changeId: number }
+  | { type: 'flush'; requestId: number }
   | { type: 'externalEdit'; frontmatter: string; body: string; syncVersion: number; discardLocal?: boolean }
   | { type: 'imageUris'; entries: Array<{ relPath: string; displayUri: string }> };
 
 export type WebviewToHost =
   | { type: 'ready' }
   | { type: 'change'; frontmatter: string; body: string; syncVersion: number; changeId: number }
-  | { type: 'save' }
+  | { type: 'flushed'; requestId: number; change?: { frontmatter: string; body: string; syncVersion: number; changeId: number } }
   | { type: 'saveImage'; requestId: string; bytes: Uint8Array; mime: string }
   | { type: 'resolveImages'; relPaths: string[] }
   | { type: 'openLink'; url: string }

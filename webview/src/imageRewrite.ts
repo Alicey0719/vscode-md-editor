@@ -3,20 +3,10 @@
 // never the underlying ProseMirror node attrs, so serialization output stays
 // as the original relative path.
 
-import { post, onMessage } from './hostBridge';
-
-const uriCache = new Map<string, string>();
-const pending = new Set<string>();
+import { cachedImageUri, onMessage, requestImageUris } from './hostBridge';
 
 function isTargetSrc(src: string): boolean {
   return /^img\/[0-9a-zA-Z._-]+$/.test(src);
-}
-
-function requestResolve(relPaths: string[]): void {
-  const need = relPaths.filter((p) => !uriCache.has(p) && !pending.has(p));
-  if (need.length === 0) return;
-  need.forEach((p) => pending.add(p));
-  post({ type: 'resolveImages', relPaths: need });
 }
 
 function apply(root: HTMLElement): void {
@@ -25,7 +15,7 @@ function apply(root: HTMLElement): void {
   imgs.forEach((img) => {
     const original = img.getAttribute('src') ?? '';
     if (!isTargetSrc(original)) return;
-    const cached = uriCache.get(original);
+    const cached = cachedImageUri(original);
     if (cached) {
       if (img.src !== cached) {
         img.setAttribute('data-original-src', original);
@@ -35,21 +25,13 @@ function apply(root: HTMLElement): void {
       missing.push(original);
     }
   });
-  if (missing.length > 0) requestResolve(missing);
+  if (missing.length > 0) requestImageUris(missing);
 }
 
 export function installImageRewriter(root: HTMLElement): () => void {
+  // hostBridge has updated its cache by the time these handlers run.
   onMessage((msg) => {
-    if (msg.type === 'imageUris') {
-      for (const { relPath, displayUri } of msg.entries) {
-        uriCache.set(relPath, displayUri);
-        pending.delete(relPath);
-      }
-      apply(root);
-    } else if (msg.type === 'imageSaved') {
-      uriCache.set(msg.relPath, msg.displayUri);
-      apply(root);
-    }
+    if (msg.type === 'imageUris' || msg.type === 'imageSaved') apply(root);
   });
 
   apply(root);

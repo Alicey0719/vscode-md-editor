@@ -4,7 +4,7 @@ import { createBodyEditor, type BodyEditor } from './editor';
 import { createFrontmatterPane } from './frontmatterPane';
 import { createLegacyBanner } from './legacyBanner';
 import { installImageRewriter } from './imageRewrite';
-import type { LegacyReport } from './messaging';
+import type { HostToWebview, LegacyReport } from './messaging';
 
 const DEBOUNCE_MS = 250;
 
@@ -26,25 +26,63 @@ async function bootstrap(): Promise<void> {
   let sent: Array<{ id: number; body: string; frontmatter: string }> = [];
   let nextChangeId = 0;
   let changeTimer: ReturnType<typeof setTimeout> | null = null;
+  // Host edits not shown yet. Bursts (typing in the plain editor) are
+  // collapsed into the latest one; `confirmed*` is what the host held before
+  // the first of them.
+  let pendingExternal: {
+    msg: Extract<HostToWebview, { type: 'externalEdit' }>;
+    confirmedBody: string;
+    confirmedFrontmatter: string;
+  } | null = null;
 
-  // Send local edits now (debounce elapsed, focus left, or about to save).
-  const flush = () => {
+  const clearTimer = () => {
     if (changeTimer !== null) {
       clearTimeout(changeTimer);
       changeTimer = null;
     }
-    if (!bodyEditor) return;
-    const { markdown, changed } = bodyEditor.takeMarkdown();
-    if (!changed && !frontmatterDirty) return;
-    frontmatterDirty = false;
-    const changeId = ++nextChangeId;
-    sent.push({ id: changeId, body: markdown, frontmatter: frontmatterValue });
-    post({ type: 'change', frontmatter: frontmatterValue, body: markdown, syncVersion, changeId });
   };
 
   const scheduleChange = () => {
-    if (changeTimer !== null) clearTimeout(changeTimer);
+    clearTimer();
     changeTimer = setTimeout(flush, DEBOUNCE_MS);
+  };
+
+  const showExternal = () => {
+    const pending = pendingExternal;
+    if (!pending) return;
+    pendingExternal = null;
+    const { msg } = pending;
+    syncVersion = msg.syncVersion;
+    // Frontmatter: an edit elsewhere wins; otherwise keep (and resend) ours.
+    const external = msg.frontmatter !== pending.confirmedFrontmatter || msg.discardLocal;
+    if (external && msg.frontmatter !== hostFrontmatterOf(frontmatterValue)) {
+      frontmatterValue = msg.frontmatter;
+      frontmatterPane?.setValue(msg.frontmatter);
+    }
+    frontmatterDirty = hostFrontmatterOf(frontmatterValue) !== msg.frontmatter;
+    if (!bodyEditor) return;
+    if (bodyEditor.setMarkdown(msg.body, pending.confirmedBody, msg.discardLocal) || frontmatterDirty) scheduleChange();
+    else clearTimer();
+  };
+
+  // Local edits not yet sent, as a change to send; recorded as unacknowledged.
+  const takeChange = () => {
+    clearTimer();
+    // Never send edits computed without the host's latest text.
+    showExternal();
+    if (!bodyEditor) return undefined;
+    const { markdown, changed } = bodyEditor.takeMarkdown();
+    if (!changed && !frontmatterDirty) return undefined;
+    frontmatterDirty = false;
+    const changeId = ++nextChangeId;
+    sent.push({ id: changeId, body: markdown, frontmatter: frontmatterValue });
+    return { frontmatter: frontmatterValue, body: markdown, syncVersion, changeId };
+  };
+
+  // Send local edits now (debounce elapsed or focus left).
+  const flush = () => {
+    const change = takeChange();
+    if (change) post({ type: 'change', ...change });
   };
 
   onMessage((msg) => {
@@ -56,35 +94,28 @@ async function bootstrap(): Promise<void> {
       frontmatterDirty = false;
       sent = [];
       nextChangeId = 0;
+      pendingExternal = null;
       void mount(msg.legacy);
     } else if (msg.type === 'applied') {
       const i = sent.findIndex((c) => c.id === msg.changeId);
       if (i < 0) return;
       hostBody = sent[i].body;
-      hostFrontmatter = sent[i].frontmatter;
+      hostFrontmatter = hostFrontmatterOf(sent[i].frontmatter);
       sent = sent.slice(i + 1);
     } else if (msg.type === 'externalEdit') {
-      // Every change still unacknowledged was dropped; the host held
-      // hostBody / hostFrontmatter before this edit.
-      const confirmedBody = hostBody;
-      const confirmedFrontmatter = hostFrontmatter;
+      // Every change still unacknowledged was dropped.
       sent = [];
-      syncVersion = msg.syncVersion;
+      if (pendingExternal) {
+        const discardLocal = msg.discardLocal || pendingExternal.msg.discardLocal;
+        pendingExternal = { ...pendingExternal, msg: { ...msg, discardLocal } };
+      } else {
+        pendingExternal = { msg, confirmedBody: hostBody, confirmedFrontmatter: hostFrontmatter };
+        setTimeout(showExternal, 0);
+      }
       hostBody = msg.body;
       hostFrontmatter = msg.frontmatter;
-      // Frontmatter: an edit elsewhere wins; otherwise keep (and resend) ours.
-      const external = msg.frontmatter !== confirmedFrontmatter || msg.discardLocal;
-      if (external && msg.frontmatter !== frontmatterValue) {
-        frontmatterValue = msg.frontmatter;
-        frontmatterPane?.setValue(msg.frontmatter);
-      }
-      frontmatterDirty = frontmatterValue !== msg.frontmatter;
-      if (!bodyEditor) return;
-      if (bodyEditor.setMarkdown(msg.body, confirmedBody, msg.discardLocal) || frontmatterDirty) scheduleChange();
-      else if (changeTimer !== null) {
-        clearTimeout(changeTimer);
-        changeTimer = null;
-      }
+    } else if (msg.type === 'flush') {
+      post({ type: 'flushed', requestId: msg.requestId, change: takeChange() });
     }
   });
 
@@ -149,13 +180,6 @@ async function bootstrap(): Promise<void> {
       // VS Code's undo on the TextDocument — which can roll back edits made
       // in the plain-text editor — and the two would fight.
       e.stopPropagation();
-    } else if (key === 's' && !e.shiftKey) {
-      // Apply pending edits first, then save: VS Code would otherwise save
-      // before the last keystrokes arrive and leave the file dirty.
-      e.preventDefault();
-      e.stopPropagation();
-      flush();
-      post({ type: 'save' });
     } else if (key === 'k' && !e.shiftKey && inBody) {
       // Ctrl+K is also VS Code's chord prefix; keep it in the editor.
       e.preventDefault();
@@ -166,6 +190,9 @@ async function bootstrap(): Promise<void> {
 
   post({ type: 'ready' });
 }
+
+// The host writes the frontmatter without its trailing newline (merge()).
+const hostFrontmatterOf = (value: string) => value.replace(/\n$/, '');
 
 bootstrap().catch((e) => {
   const err = e instanceof Error ? e.stack ?? e.message : String(e);

@@ -39,7 +39,8 @@ export function merge(frontmatter: string, body: string, hadFrontmatter: boolean
 export function documentText(current: string, frontmatter: string, body: string, eol: '\n' | '\r\n'): string {
   const cur = split(current);
   const bodyOut = body.endsWith('\n') ? body : `${body}\n`;
-  if (toLF(cur.frontmatter) === frontmatter && (cur.hadFrontmatter || frontmatter.trim() === '')) {
+  // merge() drops one trailing newline from the frontmatter too.
+  if (toLF(cur.frontmatter) === frontmatter.replace(/\n$/, '') && (cur.hadFrontmatter || frontmatter.trim() === '')) {
     // A fully re-serialized body has no leading blank line; keep the old one.
     const lead = bodyOut.startsWith('\n') ? '' : (/^\n*/.exec(toLF(cur.body)) ?? [''])[0];
     return current.slice(0, current.length - cur.body.length) + fromLF(lead + bodyOut, eol);
