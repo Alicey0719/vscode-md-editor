@@ -53,7 +53,17 @@ export function installImageRewriter(root: HTMLElement): () => void {
   });
 
   apply(root);
-  const observer = new MutationObserver(() => apply(root));
+  // Coalesce: typing mutates the DOM on every keystroke, and documents with
+  // many images would rescan all of them each time.
+  let scheduled = false;
+  const observer = new MutationObserver(() => {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => {
+      scheduled = false;
+      apply(root);
+    });
+  });
   observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
   return () => observer.disconnect();
 }

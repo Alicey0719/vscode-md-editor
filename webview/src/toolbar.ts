@@ -1,5 +1,7 @@
 import type { Crepe } from '@milkdown/crepe';
 import { commandsCtx, editorViewCtx } from '@milkdown/core';
+import type { EditorState, Transaction } from '@milkdown/prose/state';
+import { lift } from '@milkdown/prose/commands';
 import {
   toggleStrongCommand,
   toggleEmphasisCommand,
@@ -11,25 +13,35 @@ import {
   createCodeBlockCommand,
   turnIntoTextCommand,
   insertHrCommand,
+  liftListItemCommand,
 } from '@milkdown/preset-commonmark';
 import {
   toggleStrikethroughCommand,
   insertTableCommand,
 } from '@milkdown/preset-gfm';
-// Use link-tooltip's toggleLinkCommand (not preset-commonmark's) so clicking
-// the Link button opens Crepe's inline URL editor and keeps the text
-// selection. window.prompt() is unavailable in VSCode webviews.
-import { toggleLinkCommand } from '@milkdown/kit/component/link-tooltip';
+import { undoCommand, redoCommand } from '@milkdown/kit/plugin/history';
 
 type CmdKey<T> = { key: string } & { _payload?: T };
 
-export interface Toolbar {
-  root: HTMLElement;
+export interface ToolbarActions {
+  // Opens Crepe's inline URL editor: prefilled when the caret is in a link.
+  editLink: () => void;
+  insertImage: () => void;
 }
 
-export function createToolbar(crepe: Crepe): Toolbar {
+export interface Toolbar {
+  root: HTMLElement;
+  // Reflect the selection: active marks / blocks and the current text style.
+  refresh: (state: EditorState) => void;
+}
+
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+const mod = isMac ? '⌘' : 'Ctrl+';
+
+export function createToolbar(crepe: Crepe, actions: ToolbarActions): Toolbar {
   const bar = document.createElement('div');
   bar.className = 'md-toolbar';
+  const trackers: Array<(state: EditorState) => void> = [];
 
   const focusEditor = () => {
     crepe.editor.action((ctx) => {
@@ -38,22 +50,75 @@ export function createToolbar(crepe: Crepe): Toolbar {
     });
   };
 
-  const call = <T,>(cmd: unknown, payload?: T) => {
+  const call: Callable = (cmd, payload) => {
     focusEditor();
     crepe.editor.action((ctx) => {
-      ctx.get(commandsCtx).call((cmd as CmdKey<T>).key, payload);
+      ctx.get(commandsCtx).call((cmd as CmdKey<unknown>).key, payload);
     });
   };
 
-  bar.appendChild(styleDropdown(call));
-  bar.appendChild(divider());
-  bar.appendChild(markGroup(call));
-  bar.appendChild(divider());
-  bar.appendChild(blockGroup(call));
-  bar.appendChild(divider());
-  bar.appendChild(insertGroup(call));
+  const runOnView: RunOnView = (fn) => {
+    focusEditor();
+    crepe.editor.action((ctx) => {
+      const view = ctx.get(editorViewCtx);
+      fn(view.state, view.dispatch);
+    });
+  };
 
-  return { root: bar };
+  // Toggle button: highlighted while `isActive` holds for the selection.
+  const toggle = (parent: HTMLElement, svgOrText: string, label: string, isActive: (s: EditorState) => boolean, onClick: () => void) => {
+    const b = iconBtn(parent, svgOrText, label, onClick);
+    trackers.push((state) => {
+      const active = isActive(state);
+      b.classList.toggle('is-active', active);
+      b.setAttribute('aria-pressed', String(active));
+    });
+  };
+
+  const history = group();
+  iconBtn(history, icon.undo, `Undo (${mod}Z)`, () => call(undoCommand));
+  iconBtn(history, icon.redo, `Redo (${isMac ? '⇧⌘Z' : 'Ctrl+Y'})`, () => call(redoCommand));
+  bar.appendChild(history);
+  bar.appendChild(divider());
+
+  const style = styleDropdown(call, runOnView);
+  trackers.push(style.refresh);
+  bar.appendChild(style.root);
+  bar.appendChild(divider());
+
+  const marks = group();
+  toggle(marks, icon.bold, `Bold (${mod}B)`, markActive('strong'), () => call(toggleStrongCommand));
+  toggle(marks, icon.italic, `Italic (${mod}I)`, markActive('emphasis'), () => call(toggleEmphasisCommand));
+  toggle(marks, icon.strike, 'Strikethrough', markActive('strike_through'), () => call(toggleStrikethroughCommand));
+  toggle(marks, icon.code, 'Inline code', markActive('inlineCode'), () => call(toggleInlineCodeCommand));
+  bar.appendChild(marks);
+  bar.appendChild(divider());
+
+  const blocks = group();
+  const inBullet = inNode('bullet_list');
+  const inOrdered = inNode('ordered_list');
+  const inQuote = inNode('blockquote');
+  const inCode = (s: EditorState) => s.selection.$from.parent.type.name === 'code_block';
+  toggle(blocks, icon.ul, 'Bullet list', inBullet, () => call(innermostList(crepe) === 'bullet_list' ? liftListItemCommand : wrapInBulletListCommand));
+  toggle(blocks, icon.ol, 'Numbered list', inOrdered, () => call(innermostList(crepe) === 'ordered_list' ? liftListItemCommand : wrapInOrderedListCommand));
+  toggle(blocks, icon.quote, 'Blockquote', inQuote, () => (isActiveNow(crepe, inQuote) ? runOnView(lift) : call(wrapInBlockquoteCommand)));
+  toggle(blocks, icon.codeBlock, 'Code block', inCode, () => call(isActiveNow(crepe, inCode) ? turnIntoTextCommand : createCodeBlockCommand));
+  bar.appendChild(blocks);
+  bar.appendChild(divider());
+
+  const insert = group();
+  toggle(insert, icon.link, `Link (${mod}K)`, markActive('link'), actions.editLink);
+  iconBtn(insert, icon.image, 'Insert image', actions.insertImage);
+  iconBtn(insert, icon.table, 'Insert table', () => call(insertTableCommand));
+  iconBtn(insert, icon.hr, 'Horizontal rule', () => call(insertHrCommand));
+  bar.appendChild(insert);
+
+  return {
+    root: bar,
+    refresh: (state) => {
+      for (const t of trackers) t(state);
+    },
+  };
 }
 
 function divider(): HTMLElement {
@@ -70,6 +135,41 @@ function group(): HTMLElement {
 
 interface Callable {
   <T>(cmd: unknown, payload?: T): void;
+}
+
+type RunOnView = (fn: (state: EditorState, dispatch: (tr: Transaction) => void) => boolean) => void;
+
+function markActive(name: string) {
+  return (state: EditorState): boolean => {
+    const type = state.schema.marks[name];
+    if (!type) return false;
+    const { from, to, empty, $from } = state.selection;
+    if (empty) return Boolean(type.isInSet(state.storedMarks ?? $from.marks()));
+    return state.doc.rangeHasMark(from, to, type);
+  };
+}
+
+function inNode(name: string) {
+  return (state: EditorState): boolean => {
+    const { $from } = state.selection;
+    for (let d = $from.depth; d > 0; d--) if ($from.node(d).type.name === name) return true;
+    return false;
+  };
+}
+
+function innermostList(crepe: Crepe): string | null {
+  return crepe.editor.action((ctx) => {
+    const { $from } = ctx.get(editorViewCtx).state.selection;
+    for (let d = $from.depth; d > 0; d--) {
+      const name = $from.node(d).type.name;
+      if (name === 'bullet_list' || name === 'ordered_list') return name;
+    }
+    return null;
+  });
+}
+
+function isActiveNow(crepe: Crepe, test: (s: EditorState) => boolean): boolean {
+  return crepe.editor.action((ctx) => test(ctx.get(editorViewCtx).state));
 }
 
 function iconBtn(
@@ -90,7 +190,7 @@ function iconBtn(
   return b;
 }
 
-function styleDropdown(call: Callable): HTMLElement {
+function styleDropdown(call: Callable, runOnView: RunOnView): { root: HTMLElement; refresh: (state: EditorState) => void } {
   const wrap = document.createElement('label');
   wrap.className = 'md-toolbar-style';
   const select = document.createElement('select');
@@ -102,57 +202,49 @@ function styleDropdown(call: Callable): HTMLElement {
     { value: 'h2', label: 'Heading 2' },
     { value: 'h3', label: 'Heading 3' },
     { value: 'h4', label: 'Heading 4' },
+    { value: 'h5', label: 'Heading 5' },
+    { value: 'h6', label: 'Heading 6' },
     { value: 'quote', label: 'Quote' },
     { value: 'code', label: 'Code block' },
+    // Shown when the selection is not in a text block (image, table, ...).
+    { value: '', label: '—' },
   ];
   for (const o of options) {
     const el = document.createElement('option');
     el.value = o.value;
     el.textContent = o.label;
+    if (o.value === '') el.hidden = true;
     select.appendChild(el);
   }
+  let inQuote = false;
   select.addEventListener('mousedown', (e) => e.stopPropagation());
   select.addEventListener('change', () => {
-    switch (select.value) {
-      case 'p': call(turnIntoTextCommand); break;
-      case 'h1': call(wrapInHeadingCommand, 1); break;
-      case 'h2': call(wrapInHeadingCommand, 2); break;
-      case 'h3': call(wrapInHeadingCommand, 3); break;
-      case 'h4': call(wrapInHeadingCommand, 4); break;
-      case 'quote': call(wrapInBlockquoteCommand); break;
-      case 'code': call(createCodeBlockCommand); break;
+    const v = select.value;
+    if (v === 'p') {
+      call(turnIntoTextCommand);
+      if (inQuote) runOnView(lift);
+    } else if (/^h[1-6]$/.test(v)) {
+      call(wrapInHeadingCommand, Number(v.slice(1)));
+    } else if (v === 'quote') {
+      call(wrapInBlockquoteCommand);
+    } else if (v === 'code') {
+      call(createCodeBlockCommand);
     }
-    select.value = 'p';
     select.blur();
   });
   wrap.appendChild(select);
-  return wrap;
-}
 
-function markGroup(call: Callable): HTMLElement {
-  const g = group();
-  iconBtn(g, icon.bold, 'Bold (Ctrl+B)', () => call(toggleStrongCommand));
-  iconBtn(g, icon.italic, 'Italic (Ctrl+I)', () => call(toggleEmphasisCommand));
-  iconBtn(g, icon.strike, 'Strikethrough', () => call(toggleStrikethroughCommand));
-  iconBtn(g, icon.code, 'Inline code', () => call(toggleInlineCodeCommand));
-  return g;
-}
-
-function blockGroup(call: Callable): HTMLElement {
-  const g = group();
-  iconBtn(g, icon.ul, 'Bullet list', () => call(wrapInBulletListCommand));
-  iconBtn(g, icon.ol, 'Numbered list', () => call(wrapInOrderedListCommand));
-  iconBtn(g, icon.quote, 'Blockquote', () => call(wrapInBlockquoteCommand));
-  iconBtn(g, icon.codeBlock, 'Code block', () => call(createCodeBlockCommand));
-  return g;
-}
-
-function insertGroup(call: Callable): HTMLElement {
-  const g = group();
-  iconBtn(g, icon.link, 'Link', () => call(toggleLinkCommand));
-  iconBtn(g, icon.table, 'Insert table', () => call(insertTableCommand));
-  iconBtn(g, icon.hr, 'Horizontal rule', () => call(insertHrCommand));
-  return g;
+  const refresh = (state: EditorState) => {
+    const { $from } = state.selection;
+    const parent = $from.parent;
+    inQuote = inNode('blockquote')(state);
+    let value = '';
+    if (parent.type.name === 'heading') value = `h${parent.attrs.level}`;
+    else if (parent.type.name === 'code_block') value = 'code';
+    else if (parent.type.name === 'paragraph') value = inQuote ? 'quote' : 'p';
+    if (select.value !== value) select.value = value;
+  };
+  return { root: wrap, refresh };
 }
 
 // Simple monochrome icons (currentColor). Compact SVG paths chosen for legibility
@@ -161,6 +253,8 @@ const svg = (path: string): string =>
   `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${path}</svg>`;
 
 const icon = {
+  undo: svg('<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>'),
+  redo: svg('<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>'),
   bold: '<span class="md-toolbar-glyph" style="font-weight:700">B</span>',
   italic: '<span class="md-toolbar-glyph" style="font-style:italic;font-family:serif">I</span>',
   strike: '<span class="md-toolbar-glyph" style="text-decoration:line-through">S</span>',
@@ -170,6 +264,7 @@ const icon = {
   quote: svg('<path d="M7 8h4v6a4 4 0 0 1-4 4"/><path d="M15 8h4v6a4 4 0 0 1-4 4"/>'),
   codeBlock: svg('<rect x="3" y="4" width="18" height="16" rx="2"/><polyline points="9 9 6 12 9 15"/><polyline points="15 9 18 12 15 15"/>'),
   link: svg('<path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/>'),
+  image: svg('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="8.5" cy="9.5" r="1.5"/><path d="m21 16-5-5-9 9"/>'),
   table: svg('<rect x="3" y="4" width="18" height="16" rx="1"/><line x1="3" y1="10" x2="21" y2="10"/><line x1="3" y1="16" x2="21" y2="16"/><line x1="9" y1="4" x2="9" y2="20"/><line x1="15" y1="4" x2="15" y2="20"/>'),
   hr: svg('<line x1="4" y1="12" x2="20" y2="12"/>'),
 };

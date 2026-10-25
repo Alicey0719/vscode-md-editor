@@ -127,6 +127,11 @@ body.vscode-high-contrast {
 .md-toolbar-btn:active {
   background: var(--vscode-toolbar-activeBackground, rgba(128,128,128,0.28));
 }
+.md-toolbar-btn.is-active {
+  background: var(--vscode-toolbar-activeBackground, rgba(128,128,128,0.28));
+  border-color: var(--md-paper-border);
+  color: var(--vscode-focusBorder, var(--vscode-editor-foreground));
+}
 .md-toolbar-glyph {
   display: inline-block;
   min-width: 12px;
@@ -347,6 +352,17 @@ body.vscode-high-contrast {
 .md-paper .milkdown .ProseMirror img {
   max-width: 100%;
   height: auto;
+}
+.md-upload-placeholder {
+  display: inline-block;
+  margin: 4px 0;
+  padding: 6px 12px;
+  border: 1px dashed var(--vscode-focusBorder, rgba(128,128,128,0.6));
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+  background: var(--vscode-textCodeBlock-background, rgba(128,128,128,0.1));
+  user-select: none;
 }
 :root {
   --md-link-color: #4ea3ff;

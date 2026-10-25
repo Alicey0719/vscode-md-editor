@@ -34,10 +34,12 @@ export function nextRequestId(): string {
   return `${Date.now().toString(36)}-${counter}`;
 }
 
+const uriCache = new Map<string, string>();
 const pending = new Map<string, { resolve: (r: { relPath: string; displayUri: string }) => void; reject: (e: Error) => void }>();
 
 onMessage((msg) => {
   if (msg.type === 'imageSaved') {
+    uriCache.set(msg.relPath, msg.displayUri);
     const p = pending.get(msg.requestId);
     if (p) {
       pending.delete(msg.requestId);
@@ -52,26 +54,23 @@ onMessage((msg) => {
   }
 });
 
+// Typed arrays cross the webview boundary as binary; spreading them into a
+// number[] made every pasted image ~4x larger and slow to serialize.
 export function saveImage(bytes: Uint8Array, mime: string): Promise<{ relPath: string; displayUri: string }> {
   const requestId = nextRequestId();
   return new Promise((resolve, reject) => {
     pending.set(requestId, { resolve, reject });
-    post({
-      type: 'saveImage',
-      requestId,
-      bytes: Array.from(bytes),
-      mime,
-    });
+    post({ type: 'saveImage', requestId, bytes, mime });
+    // Generous: HEIC conversion runs an external tool on the host.
     setTimeout(() => {
       if (pending.has(requestId)) {
         pending.delete(requestId);
         reject(new Error('timeout'));
       }
-    }, 30000);
+    }, 120000);
   });
 }
 
-const uriCache = new Map<string, string>();
 const uriWaiters = new Map<string, Array<(uri: string | null) => void>>();
 
 onMessage((msg) => {
